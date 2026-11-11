@@ -224,6 +224,6 @@ jobs:
           echo "ipa=$output" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@v7
         with:
-          name: YTKACE-IPA
+          name: Youtube-IPA
           path: ${{ steps.inject.outputs.ipa }}
           if-no-files-found: error
