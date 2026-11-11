@@ -198,7 +198,10 @@ jobs:
             key="$(basename "$deb" .deb)"
             mkdir -p "extra-root/$key"
             dpkg-deb -x "$deb" "extra-root/$key"
-            mapfile -t found < <(find "extra-root/$key" -type f -name '*.dylib' | sort)
+            found=()
+            while IFS= read -r lib; do
+              found+=("$lib")
+            done < <(find "extra-root/$key" -type f -name '*.dylib' | sort)
             if [[ ${#found[@]} -ne 1 ]]; then
               echo "$key: expected one dylib, got ${#found[@]}" >&2
               exit 1
