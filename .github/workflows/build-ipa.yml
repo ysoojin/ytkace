@@ -103,8 +103,10 @@ jobs:
               return
             fi
             echo "Building $key from $repo"
-            git clone --depth 1 --recurse-submodules "https://github.com/${repo}.git" "sources/$key"
-            pushd "sources/$key"
+            local checkout="sources/$key"
+            if [[ "$key" == 'ytvideooverlay' ]]; then checkout="sources/YTVideoOverlay"; fi
+            git clone --depth 1 --recurse-submodules "https://github.com/${repo}.git" "$checkout"
+            pushd "$checkout"
             make clean || true
             if [[ "$key" == 'ytuhd' ]]; then
               make package SIDELOAD=1 FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless DISABLE_ROOTLESS_COMPAT_WARNING=1
@@ -116,6 +118,11 @@ jobs:
             cp "$deb" "../../extra-built/${key}.deb"
             popd
           }
+          # YouQuality and YouMute include ../YTVideoOverlay/Header.h.
+          # Build the sibling helper once and include its DEB in the final IPA.
+          if [[ "$ADD_YOUQUALITY" == 'true' || "$ADD_YOUMUTE" == 'true' ]]; then
+            build_tweak ytvideooverlay PoomSmart/YTVideoOverlay true
+          fi
           build_tweak ryd PoomSmart/Return-YouTube-Dislikes "$ADD_RYD"
           build_tweak ytuhd PoomSmart/YTUHD "$ADD_YTUHD"
           build_tweak ytabconfig PoomSmart/YTABConfig "$ADD_YTABCONFIG"
