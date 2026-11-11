@@ -1,56 +1,47 @@
-name: IPA (YTKACE + selectable non-overlapping tweaks)
+name: IPA (YTKACE + selectable tweaks)
 
 on:
   workflow_dispatch:
     inputs:
       ipa_url:
-        description: Direct decrypted YouTube IPA URL (iOS 17+ for 21.45.4)
+        description: Decrypted YouTube IPA URL
         required: true
         type: string
         default: 'https://www.dropbox.com/scl/fi/odyv50o9pgx7fh8nr8u5h/com.google.ios.youtube-21.45.4-Decrypted.ipa?rlkey=q8sq80ak1t8qr0pwe1t8f448e&st=tqx7k2kt&dl=1'
       add_ryd:
-        description: 'Return YouTube Dislikes'
-        required: true
+        description: Return YouTube Dislikes
         type: boolean
         default: true
       add_ytuhd:
-        description: 'YTUHD 4K video quality (experimental)'
-        required: true
+        description: YTUHD 4K (macOS library build; experimental)
         type: boolean
         default: false
       add_ytabconfig:
-        description: 'YTABConfig advanced flags (experimental)'
-        required: true
+        description: YTABConfig
         type: boolean
         default: false
       add_youquality:
-        description: 'YouQuality overlay quality controls (experimental)'
-        required: true
+        description: YouQuality
         type: boolean
         default: false
       add_youslider:
-        description: 'YouSlider progress bar (experimental)'
-        required: true
+        description: YouSlider
         type: boolean
         default: false
       add_youmute:
-        description: 'YouMute quick mute (experimental)'
-        required: true
+        description: YouMute
         type: boolean
         default: false
       add_ytsilentvote:
-        description: 'YTSilentVote voting UI (experimental)'
-        required: true
+        description: YTSilentVote
         type: boolean
         default: false
       add_donteatmycontent:
-        description: 'DontEatMyContent notch layout (experimental)'
-        required: true
+        description: DontEatMyContent (duplicate symbol fix)
         type: boolean
         default: false
       add_yougetcaption:
-        description: 'YouGetCaption copy captions (experimental)'
-        required: true
+        description: YouGetCaption
         type: boolean
         default: false
 
@@ -62,16 +53,40 @@ jobs:
     uses: ./.github/workflows/build-deb.yml
 
   extra-tweaks:
-    runs-on: ubuntu-24.04
+    runs-on: ${{ inputs.add_ytuhd && 'macos-15' || 'ubuntu-24.04' }}
     env:
       THEOS: ${{ github.workspace }}/.theos
       CI: 'true'
     steps:
       - uses: actions/checkout@v6
+
+      - name: Show runner and selected options
+        env:
+          ADD_YTUHD: ${{ inputs.add_ytuhd }}
+          ADD_DONTEATMYCONTENT: ${{ inputs.add_donteatmycontent }}
+        run: |
+          echo "runner=$RUNNER_OS ytuhd=$ADD_YTUHD dontEat=$ADD_DONTEATMYCONTENT"
+          if [[ "$ADD_YTUHD" == 'true' && "$RUNNER_OS" != 'macOS' ]]; then
+            echo 'YTUHD requires macOS runner' >&2
+            exit 1
+          fi
+
+      - name: Install build tools for YTUHD
+        if: ${{ inputs.add_ytuhd }}
+        run: |
+          set -euo pipefail
+          brew install meson ninja pkg-config autoconf automake libtool nasm yasm
+          if ! xcrun --sdk iphoneos --show-sdk-path >/dev/null 2>&1; then
+            export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
+            echo "DEVELOPER_DIR=$DEVELOPER_DIR" >> "$GITHUB_ENV"
+          fi
+          xcrun --sdk iphoneos --show-sdk-path
+
       - name: Install Theos
-        run: bash -c "$(curl -fsSL https://raw.githubusercontent.com/roothide/theos/master/bin/install-theos)"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash -c "$(curl -fsSL https://raw.githubusercontent.com/roothide/theos/master/bin/install-theos)"
+
       - name: Install shared headers
         run: |
           set -euo pipefail
@@ -80,6 +95,7 @@ jobs:
           git clone --depth 1 https://github.com/PoomSmart/YouTubeHeader.git "$THEOS/include/YouTubeHeader"
           test -f "$THEOS/include/PSHeader/Misc.h"
           test -f "$THEOS/include/YouTubeHeader/YTLikeStatus.h"
+
       - name: Build selected tweaks
         env:
           ADD_RYD: ${{ inputs.add_ryd }}
@@ -94,21 +110,48 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p extra-built sources
-          # No generic automatic dependency fixing: fail loudly if a selected
-          # upstream tweak needs specialized build tools or private headers.
+
           build_tweak() {
             local key="$1" repo="$2" flag="$3"
-            if [[ "$flag" != 'true' ]]; then
+            if [[ "$flag" != true ]]; then
               echo "SKIP $key"
               return
             fi
             echo "Building $key from $repo"
             local checkout="sources/$key"
-            if [[ "$key" == 'ytvideooverlay' ]]; then checkout="sources/YTVideoOverlay"; fi
+            if [[ "$key" == ytvideooverlay ]]; then
+              checkout="sources/YTVideoOverlay"
+            fi
             git clone --depth 1 --recurse-submodules "https://github.com/${repo}.git" "$checkout"
             pushd "$checkout"
+
+            if [[ "$key" == donteatmycontent ]]; then
+              # Tweak.h defines a global that is compiled into two .o files.
+              # Keep one definition in Tweak.x; declare it extern in Tweak.h.
+              python3 - <<'PYFIX'
+          from pathlib import Path
+          p = Path('Tweak.h')
+          s = p.read_text()
+          before = 'CGFloat constant;'
+          assert s.count(before) == 1, 'Unexpected upstream Tweak.h; do not patch blindly'
+          p.write_text(s.replace(before, 'extern CGFloat constant;', 1))
+          t = Path('Tweak.x')
+          t_src = t.read_text()
+          marker = '#import "Tweak.h"'
+          assert marker in t_src, 'Unexpected Tweak.x imports'
+          t.write_text(t_src.replace(marker, marker + '\nCGFloat constant;', 1))
+          PYFIX
+            fi
+
             make clean || true
-            if [[ "$key" == 'ytuhd' ]]; then
+            if [[ "$key" == ytuhd ]]; then
+              test -d vendor/libvpx
+              test -d vendor/dav1d
+              git submodule update --init --recursive
+              make libvpx
+              make dav1d
+              test -f vendor/libvpx_ios/libvpx.a
+              test -f vendor/dav1d_ios/libdav1d.a
               make package SIDELOAD=1 FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless DISABLE_ROOTLESS_COMPAT_WARNING=1
             else
               make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless DISABLE_ROOTLESS_COMPAT_WARNING=1
@@ -118,9 +161,8 @@ jobs:
             cp "$deb" "../../extra-built/${key}.deb"
             popd
           }
-          # YouQuality and YouMute include ../YTVideoOverlay/Header.h.
-          # Build the sibling helper once and include its DEB in the final IPA.
-          if [[ "$ADD_YOUQUALITY" == 'true' || "$ADD_YOUMUTE" == 'true' ]]; then
+
+          if [[ "$ADD_YOUQUALITY" == true || "$ADD_YOUMUTE" == true ]]; then
             build_tweak ytvideooverlay PoomSmart/YTVideoOverlay true
           fi
           build_tweak ryd PoomSmart/Return-YouTube-Dislikes "$ADD_RYD"
@@ -132,13 +174,14 @@ jobs:
           build_tweak ytsilentvote PoomSmart/YTSilentVote "$ADD_YTSILENTVOTE"
           build_tweak donteatmycontent therealFoxster/DontEatMyContent "$ADD_DONTEATMYCONTENT"
           build_tweak yougetcaption PoomSmart/YouGetCaption "$ADD_YOUGETCAPTION"
+          printf 'Selected tweak packages.\n' > extra-built/README.txt
           find extra-built -maxdepth 1 -name '*.deb' -print | sort
-          printf 'Selected tweak packages built above.\n' > extra-built/README.txt
+
       - uses: actions/upload-artifact@v7
         with:
           name: YTKACE-selected-extra-debs
           path: extra-built/
-          if-no-files-found: ignore
+          if-no-files-found: error
 
   package:
     needs: [ytkace, extra-tweaks]
@@ -168,9 +211,9 @@ jobs:
           fi
           python3 - <<'PYVALIDATE'
           import zipfile
-          assert zipfile.is_zipfile('YouTube.ipa'), 'URL did not return a valid IPA/ZIP'
+          assert zipfile.is_zipfile('YouTube.ipa'), 'Not a valid IPA/ZIP'
           with zipfile.ZipFile('YouTube.ipa') as z:
-              assert any(n.startswith('Payload/') and n.endswith('.app/Info.plist') for n in z.namelist()), 'Missing app Info.plist'
+              assert any(n.startswith('Payload/') and n.endswith('.app/Info.plist') for n in z.namelist())
           PYVALIDATE
       - name: Inject YTKACE and selected tweaks
         id: inject
@@ -185,15 +228,14 @@ jobs:
           youtube_version="$(python3 - <<'PYVERSION'
           import plistlib, zipfile
           with zipfile.ZipFile('YouTube.ipa') as z:
-              info=next(n for n in z.namelist() if n.startswith('Payload/') and n.endswith('.app/Info.plist'))
+              info = next(n for n in z.namelist() if n.startswith('Payload/') and n.endswith('.app/Info.plist'))
               print(plistlib.loads(z.read(info))['CFBundleShortVersionString'])
           PYVERSION
           )"
-          output="YTKACE_${version}_YouTube_${youtube_version}.ipa"
+          output="YouTube_${youtube_version}_YTKACE_${version}.ipa"
           mkdir -p extra-root
           dylibs=()
           shopt -s nullglob
-          # Unpack each DEB. Make a single array of all extra .dylib files.
           for deb in extra-packages/*.deb; do
             key="$(basename "$deb" .deb)"
             mkdir -p "extra-root/$key"
@@ -208,22 +250,20 @@ jobs:
             fi
             dylibs+=("${found[0]}")
           done
-          export LDID="$(brew --prefix)/bin/ldid"
-          # One repack run: keep YTKACE and every extra library, sign once.
           bash Scripts/sideload-repack.sh YouTube.ipa "$ytkace" "$output" "${dylibs[@]}"
           bash Tools/verify-artifacts.sh "$ytkace" "$output"
           python3 - "$output" "$ytkace" "${dylibs[@]}" <<'PYVERIFY'
-          import pathlib,sys,zipfile
+          import pathlib, sys, zipfile
           with zipfile.ZipFile(sys.argv[1]) as z:
-              files=set(z.namelist())
+              files = set(z.namelist())
               for lib in sys.argv[2:]:
-                  name=pathlib.Path(lib).name
-                  assert any(p.endswith('/Frameworks/'+name) for p in files),f'Missing library: {name}'
-          print('All requested dylibs are present in the final IPA')
+                  name = pathlib.Path(lib).name
+                  assert any(p.endswith('/Frameworks/' + name) for p in files), f'Missing library: {name}'
+          print('All requested dylibs are present')
           PYVERIFY
           echo "ipa=$output" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@v7
         with:
-          name: Youtube-IPA
+          name: YouTube-IPA
           path: ${{ steps.inject.outputs.ipa }}
           if-no-files-found: error
