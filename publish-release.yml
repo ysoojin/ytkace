@@ -1,0 +1,106 @@
+name: Publish YouTube Release
+
+on:
+  workflow_run:
+    workflows:
+      - 'IPA (YTKACE + selectable non-overlapping tweaks)'
+      - 'IPA (YTKACE + selectable tweaks)'
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: 'Successful IPA workflow run ID to publish'
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: write
+
+concurrency:
+  group: publish-youtube-${{ github.event.workflow_run.id || inputs.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: >-
+      (github.event_name == 'workflow_dispatch') ||
+      (github.event_name == 'workflow_run' &&
+       github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_branch == 'main' &&
+       github.event.workflow_run.event == 'workflow_dispatch')
+    runs-on: ubuntu-24.04
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      RUN_ID: ${{ github.event.workflow_run.id || inputs.run_id }}
+    steps:
+      - name: Check source workflow run
+        id: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$RUN_ID" =~ ^[0-9]+$ ]] || { echo 'Run ID must be numeric'; exit 1; }
+          gh api "repos/$REPO/actions/runs/$RUN_ID" > run.json
+          jq -e --arg repo "$REPO" '
+            .repository.full_name == $repo and
+            .path == ".github/workflows/build-ipa.yml" and
+            .head_branch == "main" and
+            .event == "workflow_dispatch" and
+            .status == "completed" and
+            .conclusion == "success"
+          ' run.json >/dev/null
+          sha="$(jq -r '.head_sha' run.json)"
+          [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "tag=youtube-build-${RUN_ID}" >> "$GITHUB_OUTPUT"
+
+      - name: Download selected build artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts ipa deb
+          gh run download "$RUN_ID" --repo "$REPO" --dir artifacts
+          # Only expected IPA and rootless DEB artifact names are accepted.
+          for dir in YouTube-IPA YTKACE-IPA YTKACE-IPA-single; do
+            if [[ -d "artifacts/$dir" ]]; then
+              find "artifacts/$dir" -type f -name '*.ipa' -exec cp {} ipa/ \;
+            fi
+          done
+          if [[ -d artifacts/YTKACE-deb-rootless ]]; then
+            find artifacts/YTKACE-deb-rootless -type f -name '*.deb' -exec cp {} deb/ \;
+          fi
+          shopt -s nullglob
+          ipas=(ipa/*.ipa)
+          debs=(deb/*.deb)
+          if (( ${#ipas[@]} != 1 || ${#debs[@]} != 1 )); then
+            printf 'Expected exactly 1 IPA and 1 Rootless DEB, found %s IPA and %s DEB\n' "${#ipas[@]}" "${#debs[@]}" >&2
+            exit 1
+          fi
+          file "${ipas[0]}" "${debs[0]}"
+          python3 - "${ipas[0]}" <<'PY'
+          import sys, zipfile
+          with zipfile.ZipFile(sys.argv[1]) as z:
+              assert any(p.startswith('Payload/') and p.endswith('.app/Info.plist') for p in z.namelist())
+          PY
+          (cd ipa && sha256sum *.ipa) > SHA256SUMS.txt
+          (cd deb && sha256sum *.deb) >> SHA256SUMS.txt
+
+      - name: Create a new GitHub Release
+        shell: bash
+        env:
+          TAG: ${{ steps.source.outputs.tag }}
+          SOURCE_SHA: ${{ steps.source.outputs.sha }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+            echo "Release $TAG already exists. Not overwriting it." >&2
+            exit 1
+          fi
+          gh release create "$TAG" \
+            --repo "$REPO" \
+            --target "$SOURCE_SHA" \
+            --title "YouTube IPA + YTKACE Rootless DEB (run $RUN_ID)" \
+            --notes "Built from successful IPA workflow run $RUN_ID. Contains one YouTube IPA and one YTKACE Rootless DEB. Check app compatibility before installation." \
+            ipa/*.ipa deb/*.deb SHA256SUMS.txt
+          echo "Release: https://github.com/$REPO/releases/tag/$TAG"
