@@ -37,6 +37,14 @@ jobs:
         run: bash -c "$(curl -fsSL https://raw.githubusercontent.com/roothide/theos/master/bin/install-theos)"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Install RYD header dependencies
+        run: |
+          set -euo pipefail
+          mkdir -p "$THEOS/include"
+          git clone --depth 1 https://github.com/PoomSmart/PSHeader.git "$THEOS/include/PSHeader"
+          git clone --depth 1 https://github.com/PoomSmart/YouTubeHeader.git "$THEOS/include/YouTubeHeader"
+          test -f "$THEOS/include/PSHeader/Misc.h"
+          test -f "$THEOS/include/YouTubeHeader/YTLikeStatus.h"
       - name: Build RYD rootless package
         working-directory: extra-src
         run: |
