@@ -46,16 +46,13 @@ python3 "$ROOT/Tools/sanitize_plist.py" "$APP/Info.plist"
 mkdir -p "$APP/Frameworks"
 # Inject every library into the SAME app before signing and repacking.
 # Reject duplicate basenames: an overwrite would silently lose a tweak.
-SEEN_NAMES=()
 for lib in "${DYLIBS[@]}"; do
   name="$(basename "$lib")"
-  for prev in "${SEEN_NAMES[@]}"; do
-    if [[ "$prev" == "$name" ]]; then
-      echo "Duplicate library name: $name" >&2
-      exit 1
-    fi
-  done
-  SEEN_NAMES+=("$name")
+  # No empty arrays: compatible with macOS Bash 3.2 and set -u.
+  if [[ -e "$APP/Frameworks/$name" ]]; then
+    echo "Duplicate or existing library name: $name" >&2
+    exit 1
+  fi
   cp "$lib" "$APP/Frameworks/$name"
   python3 "$ROOT/Tools/macho_inject.py" "$MAIN" --add-load "@rpath/$name"
 done
