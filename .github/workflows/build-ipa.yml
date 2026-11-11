@@ -1,18 +1,58 @@
-name: IPA (YTKACE + optional RYD)
+name: IPA (YTKACE + selectable non-overlapping tweaks)
 
 on:
   workflow_dispatch:
     inputs:
       ipa_url:
-        description: Direct URL of decrypted YouTube IPA
+        description: Direct decrypted YouTube IPA URL (iOS 17+ for 21.45.4)
         required: true
         type: string
         default: 'https://www.dropbox.com/scl/fi/odyv50o9pgx7fh8nr8u5h/com.google.ios.youtube-21.45.4-Decrypted.ipa?rlkey=q8sq80ak1t8qr0pwe1t8f448e&st=tqx7k2kt&dl=1'
       add_ryd:
-        description: Add Return YouTube Dislikes (experimental)
+        description: 'Return YouTube Dislikes'
         required: true
         type: boolean
         default: true
+      add_ytuhd:
+        description: 'YTUHD 4K video quality (experimental)'
+        required: true
+        type: boolean
+        default: false
+      add_ytabconfig:
+        description: 'YTABConfig advanced flags (experimental)'
+        required: true
+        type: boolean
+        default: false
+      add_youquality:
+        description: 'YouQuality overlay quality controls (experimental)'
+        required: true
+        type: boolean
+        default: false
+      add_youslider:
+        description: 'YouSlider progress bar (experimental)'
+        required: true
+        type: boolean
+        default: false
+      add_youmute:
+        description: 'YouMute quick mute (experimental)'
+        required: true
+        type: boolean
+        default: false
+      add_ytsilentvote:
+        description: 'YTSilentVote voting UI (experimental)'
+        required: true
+        type: boolean
+        default: false
+      add_donteatmycontent:
+        description: 'DontEatMyContent notch layout (experimental)'
+        required: true
+        type: boolean
+        default: false
+      add_yougetcaption:
+        description: 'YouGetCaption copy captions (experimental)'
+        required: true
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -21,23 +61,18 @@ jobs:
   ytkace:
     uses: ./.github/workflows/build-deb.yml
 
-  ryd:
-    if: ${{ inputs.add_ryd }}
+  extra-tweaks:
     runs-on: ubuntu-24.04
     env:
       THEOS: ${{ github.workspace }}/.theos
       CI: 'true'
     steps:
       - uses: actions/checkout@v6
-        with:
-          repository: PoomSmart/Return-YouTube-Dislikes
-          path: extra-src
-          submodules: recursive
       - name: Install Theos
         run: bash -c "$(curl -fsSL https://raw.githubusercontent.com/roothide/theos/master/bin/install-theos)"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - name: Install RYD header dependencies
+      - name: Install shared headers
         run: |
           set -euo pipefail
           mkdir -p "$THEOS/include"
@@ -45,21 +80,61 @@ jobs:
           git clone --depth 1 https://github.com/PoomSmart/YouTubeHeader.git "$THEOS/include/YouTubeHeader"
           test -f "$THEOS/include/PSHeader/Misc.h"
           test -f "$THEOS/include/YouTubeHeader/YTLikeStatus.h"
-      - name: Build RYD rootless package
-        working-directory: extra-src
+      - name: Build selected tweaks
+        env:
+          ADD_RYD: ${{ inputs.add_ryd }}
+          ADD_YTUHD: ${{ inputs.add_ytuhd }}
+          ADD_YTABCONFIG: ${{ inputs.add_ytabconfig }}
+          ADD_YOUQUALITY: ${{ inputs.add_youquality }}
+          ADD_YOUSLIDER: ${{ inputs.add_youslider }}
+          ADD_YOUMUTE: ${{ inputs.add_youmute }}
+          ADD_YTSILENTVOTE: ${{ inputs.add_ytsilentvote }}
+          ADD_DONTEATMYCONTENT: ${{ inputs.add_donteatmycontent }}
+          ADD_YOUGETCAPTION: ${{ inputs.add_yougetcaption }}
         run: |
-          make clean
-          make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless DISABLE_ROOTLESS_COMPAT_WARNING=1
-          test -n "$(find packages -maxdepth 1 -name '*.deb' -print -quit)"
+          set -euo pipefail
+          mkdir -p extra-built sources
+          # No generic automatic dependency fixing: fail loudly if a selected
+          # upstream tweak needs specialized build tools or private headers.
+          build_tweak() {
+            local key="$1" repo="$2" flag="$3"
+            if [[ "$flag" != 'true' ]]; then
+              echo "SKIP $key"
+              return
+            fi
+            echo "Building $key from $repo"
+            git clone --depth 1 --recurse-submodules "https://github.com/${repo}.git" "sources/$key"
+            pushd "sources/$key"
+            make clean || true
+            if [[ "$key" == 'ytuhd' ]]; then
+              make package SIDELOAD=1 FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless DISABLE_ROOTLESS_COMPAT_WARNING=1
+            else
+              make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless DISABLE_ROOTLESS_COMPAT_WARNING=1
+            fi
+            deb="$(find packages -maxdepth 1 -name '*.deb' -print -quit)"
+            test -n "$deb" || { echo "No DEB from $key" >&2; exit 1; }
+            cp "$deb" "../../extra-built/${key}.deb"
+            popd
+          }
+          build_tweak ryd PoomSmart/Return-YouTube-Dislikes "$ADD_RYD"
+          build_tweak ytuhd PoomSmart/YTUHD "$ADD_YTUHD"
+          build_tweak ytabconfig PoomSmart/YTABConfig "$ADD_YTABCONFIG"
+          build_tweak youquality PoomSmart/YouQuality "$ADD_YOUQUALITY"
+          build_tweak youslider PoomSmart/YouSlider "$ADD_YOUSLIDER"
+          build_tweak youmute PoomSmart/YouMute "$ADD_YOUMUTE"
+          build_tweak ytsilentvote PoomSmart/YTSilentVote "$ADD_YTSILENTVOTE"
+          build_tweak donteatmycontent therealFoxster/DontEatMyContent "$ADD_DONTEATMYCONTENT"
+          build_tweak yougetcaption PoomSmart/YouGetCaption "$ADD_YOUGETCAPTION"
+          find extra-built -maxdepth 1 -name '*.deb' -print | sort
+          printf 'Selected tweak packages built above.\n' > extra-built/README.txt
       - uses: actions/upload-artifact@v7
         with:
-          name: Extra-RYD-deb
-          path: extra-src/packages/*.deb
-          if-no-files-found: error
+          name: YTKACE-selected-extra-debs
+          path: extra-built/
+          if-no-files-found: ignore
 
   package:
-    needs: [ytkace, ryd]
-    if: ${{ always() && needs.ytkace.result == 'success' && (needs.ryd.result == 'success' || needs.ryd.result == 'skipped') }}
+    needs: [ytkace, extra-tweaks]
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v6
@@ -68,9 +143,8 @@ jobs:
           name: YTKACE-deb-rootless
           path: packages
       - uses: actions/download-artifact@v8
-        if: ${{ inputs.add_ryd }}
         with:
-          name: Extra-RYD-deb
+          name: YTKACE-selected-extra-debs
           path: extra-packages
       - name: Install packaging tools
         run: brew install ldid dpkg
@@ -79,59 +153,68 @@ jobs:
           IPA_URL: ${{ inputs.ipa_url }}
           GH_TOKEN: ${{ github.token }}
         run: |
+          set -euo pipefail
           if [[ "$IPA_URL" == "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/assets/"* ]]; then
             curl -fL --retry 3 -H 'Accept: application/octet-stream' -H "Authorization: Bearer $GH_TOKEN" "$IPA_URL" -o YouTube.ipa
           else
             curl -fL --retry 3 "$IPA_URL" -o YouTube.ipa
           fi
-          python3 - <<'PY'
+          python3 - <<'PYVALIDATE'
           import zipfile
           assert zipfile.is_zipfile('YouTube.ipa'), 'URL did not return a valid IPA/ZIP'
           with zipfile.ZipFile('YouTube.ipa') as z:
-              assert any(x.startswith('Payload/') and x.endswith('.app/Info.plist') for x in z.namelist()), 'Missing app Info.plist'
-          PY
-      - name: Inject YTKACE and optional RYD
+              assert any(n.startswith('Payload/') and n.endswith('.app/Info.plist') for n in z.namelist()), 'Missing app Info.plist'
+          PYVALIDATE
+      - name: Inject YTKACE and selected tweaks
         id: inject
-        env:
-          ADD_RYD: ${{ inputs.add_ryd }}
         run: |
           set -euo pipefail
           mkdir -p deb-root
-          dpkg-deb -x "$(find packages -maxdepth 1 -name '*.deb' | head -1)" deb-root
+          dpkg-deb -x "$(find packages -maxdepth 1 -name '*.deb' -print -quit)" deb-root
           ytkace="$(find deb-root -name YTKACE.dylib -print -quit)"
           test -n "$ytkace"
           export LDID="$(brew --prefix)/bin/ldid"
           version="$(awk '/^Version:/ {print $2}' control)"
-          youtube_version="$(python3 - <<'PY'
+          youtube_version="$(python3 - <<'PYVERSION'
           import plistlib, zipfile
           with zipfile.ZipFile('YouTube.ipa') as z:
               info=next(n for n in z.namelist() if n.startswith('Payload/') and n.endswith('.app/Info.plist'))
               print(plistlib.loads(z.read(info))['CFBundleShortVersionString'])
-          PY
+          PYVERSION
           )"
           output="YTKACE_${version}_YouTube_${youtube_version}.ipa"
-          bash Scripts/sideload-repack.sh YouTube.ipa "$ytkace" stage-ytkace.ipa
-          bash Tools/verify-artifacts.sh "$ytkace" stage-ytkace.ipa
-          if [ "$ADD_RYD" = 'true' ]; then
-            mkdir -p extra-root
-            dpkg-deb -x "$(find extra-packages -maxdepth 1 -name '*.deb' | head -1)" extra-root
-            count="$(find extra-root -type f -name '*.dylib' | wc -l | tr -d ' ')"
+          bash Scripts/sideload-repack.sh YouTube.ipa "$ytkace" current.ipa
+          bash Tools/verify-artifacts.sh "$ytkace" current.ipa
+          mkdir -p extra-root
+          # Each extra DEB is unpacked separately. Do not silently skip
+          # unexpected numbers of dylibs (additional dependencies need review).
+          shopt -s nullglob
+          for deb in extra-packages/*.deb; do
+            key="$(basename "$deb" .deb)"
+            mkdir -p "extra-root/$key"
+            dpkg-deb -x "$deb" "extra-root/$key"
+            count="$(find "extra-root/$key" -name '*.dylib' -type f | wc -l | tr -d ' ')"
             if [ "$count" -ne 1 ]; then
-              echo "Expected one RYD dylib; found $count. Review dependencies before injection." >&2
+              echo "$key: expected exactly one dylib, got $count" >&2
               exit 1
             fi
-            extra="$(find extra-root -type f -name '*.dylib' -print -quit)"
-            bash Scripts/sideload-repack.sh stage-ytkace.ipa "$extra" "$output"
-            bash Tools/verify-artifacts.sh "$extra" "$output"
-            # Check YTKACE remains in the repacked IPA too.
-            python3 - "$output" <<'PY'
-          import sys, zipfile
-          with zipfile.ZipFile(sys.argv[1]) as z:
-              assert any(n.endswith('YTKACE.dylib') for n in z.namelist()), 'Second injection removed YTKACE.dylib'
-          PY
-          else
-            mv stage-ytkace.ipa "$output"
-          fi
+            dylib="$(find "extra-root/$key" -name '*.dylib' -type f -print -quit)"
+            echo "Injecting $key: $dylib"
+            bash Scripts/sideload-repack.sh current.ipa "$dylib" next.ipa
+            mv next.ipa current.ipa
+          done
+          # Verify every injected dylib still exists in the final archive.
+          python3 - <<'PYVERIFY'
+          import pathlib, zipfile
+          expected={'YTKACE.dylib'}
+          expected.update(p.name for p in pathlib.Path('extra-root').rglob('*.dylib'))
+          with zipfile.ZipFile('current.ipa') as z:
+              contents={pathlib.PurePosixPath(n).name for n in z.namelist()}
+          missing=expected-contents
+          assert not missing, f'Missing injected libraries: {sorted(missing)}'
+          print('Present in IPA:', ', '.join(sorted(expected)))
+          PYVERIFY
+          mv current.ipa "$output"
           echo "ipa=$output" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@v7
         with:
