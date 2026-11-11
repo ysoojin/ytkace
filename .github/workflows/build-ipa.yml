@@ -190,38 +190,34 @@ jobs:
           PYVERSION
           )"
           output="YTKACE_${version}_YouTube_${youtube_version}.ipa"
-          bash Scripts/sideload-repack.sh YouTube.ipa "$ytkace" current.ipa
-          bash Tools/verify-artifacts.sh "$ytkace" current.ipa
           mkdir -p extra-root
-          # Each extra DEB is unpacked separately. Do not silently skip
-          # unexpected numbers of dylibs (additional dependencies need review).
+          dylibs=()
           shopt -s nullglob
+          # Unpack each DEB. Make a single array of all extra .dylib files.
           for deb in extra-packages/*.deb; do
             key="$(basename "$deb" .deb)"
             mkdir -p "extra-root/$key"
             dpkg-deb -x "$deb" "extra-root/$key"
-            count="$(find "extra-root/$key" -name '*.dylib' -type f | wc -l | tr -d ' ')"
-            if [ "$count" -ne 1 ]; then
-              echo "$key: expected exactly one dylib, got $count" >&2
+            mapfile -t found < <(find "extra-root/$key" -type f -name '*.dylib' | sort)
+            if [[ ${#found[@]} -ne 1 ]]; then
+              echo "$key: expected one dylib, got ${#found[@]}" >&2
               exit 1
             fi
-            dylib="$(find "extra-root/$key" -name '*.dylib' -type f -print -quit)"
-            echo "Injecting $key: $dylib"
-            bash Scripts/sideload-repack.sh current.ipa "$dylib" next.ipa
-            mv next.ipa current.ipa
+            dylibs+=("${found[0]}")
           done
-          # Verify every injected dylib still exists in the final archive.
-          python3 - <<'PYVERIFY'
-          import pathlib, zipfile
-          expected={'YTKACE.dylib'}
-          expected.update(p.name for p in pathlib.Path('extra-root').rglob('*.dylib'))
-          with zipfile.ZipFile('current.ipa') as z:
-              contents={pathlib.PurePosixPath(n).name for n in z.namelist()}
-          missing=expected-contents
-          assert not missing, f'Missing injected libraries: {sorted(missing)}'
-          print('Present in IPA:', ', '.join(sorted(expected)))
+          export LDID="$(brew --prefix)/bin/ldid"
+          # One repack run: keep YTKACE and every extra library, sign once.
+          bash Scripts/sideload-repack.sh YouTube.ipa "$ytkace" "$output" "${dylibs[@]}"
+          bash Tools/verify-artifacts.sh "$ytkace" "$output"
+          python3 - "$output" "$ytkace" "${dylibs[@]}" <<'PYVERIFY'
+          import pathlib,sys,zipfile
+          with zipfile.ZipFile(sys.argv[1]) as z:
+              files=set(z.namelist())
+              for lib in sys.argv[2:]:
+                  name=pathlib.Path(lib).name
+                  assert any(p.endswith('/Frameworks/'+name) for p in files),f'Missing library: {name}'
+          print('All requested dylibs are present in the final IPA')
           PYVERIFY
-          mv current.ipa "$output"
           echo "ipa=$output" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@v7
         with:
