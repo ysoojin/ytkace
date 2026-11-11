@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
       - name: Test
@@ -19,15 +19,7 @@ jobs:
 
   build:
     needs: test
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - scheme: rootless
-            suffix: rootless
-          - scheme: roothide
-            suffix: roothide
+    runs-on: ubuntu-24.04
     env:
       THEOS: ${{ github.workspace }}/.theos
       CI: true
@@ -39,7 +31,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ github.workspace }}/.theos
-          key: roothide-theos-${{ runner.os }}-v1
+          key: rootless-theos-${{ runner.os }}-ubuntu24-v2
 
       - name: Setup
         if: steps.cache-theos.outputs.cache-hit != 'true'
@@ -51,7 +43,7 @@ jobs:
         run: |
           make clean
           make package FINALPACKAGE=1 \
-            THEOS_PACKAGE_SCHEME="${{ matrix.scheme }}" \
+            THEOS_PACKAGE_SCHEME=rootless \
             DISABLE_ROOTLESS_COMPAT_WARNING=1
 
       - name: Name package
@@ -59,13 +51,13 @@ jobs:
         run: |
           deb="$(ls packages/*.deb | head -1)"
           version="$(awk '/^Version:/ {print $2}' control)"
-          output="com.itzzace.ytkace_${version}_${{ matrix.suffix }}.deb"
+          output="com.itzzace.ytkace_${version}_rootless.deb"
           mkdir -p artifacts
           cp "$deb" "artifacts/$output"
           echo "deb=artifacts/$output" >> "$GITHUB_OUTPUT"
 
       - uses: actions/upload-artifact@v7
         with:
-          name: YTKACE-deb-${{ matrix.suffix }}
+          name: YTKACE-deb-rootless
           path: ${{ steps.name.outputs.deb }}
           if-no-files-found: error
