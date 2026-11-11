@@ -4,14 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       ipa_url:
-        description: YouTube IPA URL (iOS 16 base, 21.33.6)
+        description: YouTube IPA URL (single IPA output)
         required: true
-        default: "https://www.dropbox.com/scl/fi/1m7rq3lpkg3mfsone2299/com.google.ios.youtube-21.33.6-eeveedecrypter.ipa?rlkey=b2nsvre89881puprynwkfau8q&st=4fkh7ry8&dl=1"
-        type: string
-      ipa_url_ios17:
-        description: Second YouTube IPA URL (iOS 17+ base, 21.45.4). Leave empty to build one IPA.
-        required: false
-        default: "https://www.dropbox.com/scl/fi/hulqut3vvlwa0x6bpztnz/com.google.ios.youtube-21.45.4-eeveedecrypter.ipa?rlkey=niiw36hgppqdmhz74nm45dagg&st=0wgd5has&dl=1"
+        default: "https://www.dropbox.com/scl/fi/odyv50o9pgx7fh8nr8u5h/com.google.ios.youtube-21.45.4-Decrypted.ipa?rlkey=q8sq80ak1t8qr0pwe1t8f448e&st=tqx7k2kt&dl=1"
         type: string
 
 permissions:
@@ -21,35 +16,9 @@ jobs:
   build:
     uses: ./.github/workflows/build-deb.yml
 
-  plan:
-    runs-on: ubuntu-latest
-    outputs:
-      targets: ${{ steps.targets.outputs.targets }}
-    steps:
-      - name: Collect IPA bases
-        id: targets
-        env:
-          IPA_URL: ${{ inputs.ipa_url }}
-          IPA_URL_IOS17: ${{ inputs.ipa_url_ios17 }}
-        run: |
-          python3 - <<'PY' >> "$GITHUB_OUTPUT"
-          import json
-          import os
-
-          targets = [{"label": "ios16", "url": os.environ["IPA_URL"]}]
-          second = os.environ.get("IPA_URL_IOS17", "").strip()
-          if second:
-              targets.append({"label": "ios17", "url": second})
-          print("targets=" + json.dumps(targets))
-          PY
-
   package:
-    needs: [build, plan]
+    needs: build
     runs-on: macos-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        target: ${{ fromJSON(needs.plan.outputs.targets) }}
     steps:
       - uses: actions/checkout@v6
 
@@ -65,7 +34,7 @@ jobs:
 
       - name: YouTube
         env:
-          IPA_URL: ${{ matrix.target.url }}
+          IPA_URL: ${{ inputs.ipa_url }}
           GH_TOKEN: ${{ github.token }}
         run: |
           if [[ "$IPA_URL" == "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/assets/"* ]]; then
@@ -98,17 +67,13 @@ jobs:
               print(plistlib.loads(archive.read(info))['CFBundleShortVersionString'])
           PY
           )"
-          if [ "${{ matrix.target.label }}" = "ios16" ]; then
-            output="YTKACE_${tweak_version}_YouTube_iOS16_${youtube_version}.ipa"
-          else
-            output="YTKACE_${tweak_version}_YouTube_${youtube_version}.ipa"
-          fi
+          output="YTKACE_${tweak_version}_YouTube_${youtube_version}.ipa"
           bash Scripts/sideload-repack.sh YouTube.ipa deb-root/var/jb/Library/MobileSubstrate/DynamicLibraries/YTKACE.dylib "$output"
           bash Tools/verify-artifacts.sh deb-root/var/jb/Library/MobileSubstrate/DynamicLibraries/YTKACE.dylib "$output"
           echo "ipa=$output" >> "$GITHUB_OUTPUT"
 
       - uses: actions/upload-artifact@v7
         with:
-          name: YTKACE-IPA-${{ matrix.target.label }}
+          name: YTKACE-IPA
           path: ${{ steps.inject.outputs.ipa }}
           if-no-files-found: error
