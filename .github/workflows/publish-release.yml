@@ -1,11 +1,8 @@
 name: Publish YouTube Release
 
 on:
-  workflow_run:
-    workflows:
-      - 'IPA (YTKACE + selectable non-overlapping tweaks)'
-      - 'IPA (YTKACE + selectable tweaks)'
-    types: [completed]
+  
+on:
   workflow_dispatch:
     inputs:
       run_id:
