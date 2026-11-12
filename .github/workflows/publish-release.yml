@@ -1,7 +1,6 @@
+
 name: Publish YouTube Release
 
-on:
-  
 on:
   workflow_dispatch:
     inputs:
