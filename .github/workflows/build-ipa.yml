@@ -268,3 +268,13 @@ jobs:
           name: YouTube-IPA
           path: ${{ steps.inject.outputs.ipa }}
           if-no-files-found: error
+      - name: Automatically publish to Releases
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh workflow run publish-release.yml \
+            --repo "$GITHUB_REPOSITORY" \
+            --ref main \
+            -f run_id="$GITHUB_RUN_ID"
+
