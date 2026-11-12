@@ -8,7 +8,7 @@ on:
     types: [completed]
   workflow_dispatch:
     inputs:
-      run_id:
+      run_id:43118698125
         description: 'Successful IPA workflow run ID to publish'
         required: true
         type: string
