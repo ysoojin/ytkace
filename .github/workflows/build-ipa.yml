@@ -1,4 +1,4 @@
-name: IPA (YTKACE + selectable tweaks)
+name: IPA (YTKACE + selectable tweaks; IPA only)
 
 on:
   workflow_dispatch:
@@ -9,21 +9,41 @@ on:
         type: string
         default: 'https://www.dropbox.com/scl/fi/odyv50o9pgx7fh8nr8u5h/com.google.ios.youtube-21.45.4-Decrypted.ipa?rlkey=q8sq80ak1t8qr0pwe1t8f448e&st=tqx7k2kt&dl=1'
       add_ryd:
-        description: Return YouTube Dislikes
+        description: RYD dislike count (tested working; default ON)
         type: boolean
         default: true
+      add_ytuhd:
+        description: YTUHD (jailbreak-only dependency observed; default OFF)
+        type: boolean
+        default: false
       add_ytabconfig:
-        description: YTABConfig
+        description: YTABConfig (crashes on non-jailbroken phone; default OFF)
         type: boolean
-        default: true
+        default: false
+      add_youquality:
+        description: YouQuality (requires YTVideoOverlay; default OFF)
+        type: boolean
+        default: false
       add_youslider:
-        description: YouSlider
+        description: YouSlider (crashes on non-jailbroken phone; default OFF)
         type: boolean
-        default: true
+        default: false
+      add_youmute:
+        description: YouMute (requires YTVideoOverlay; default OFF)
+        type: boolean
+        default: false
+      add_ytsilentvote:
+        description: YTSilentVote (jailbreak-only dependency observed; default OFF)
+        type: boolean
+        default: false
       add_donteatmycontent:
-        description: DontEatMyContent (duplicate symbol fix)
+        description: DontEatMyContent (untested; default OFF)
         type: boolean
-        default: true
+        default: false
+      add_yougetcaption:
+        description: YouGetCaption (requires YTVideoOverlay; default OFF)
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -31,10 +51,33 @@ permissions:
 
 jobs:
   ytkace:
-    uses: ./.github/workflows/build-deb.yml
+    runs-on: ubuntu-24.04
+    env:
+      THEOS: ${{ github.workspace }}/.theos
+      CI: 'true'
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Theos
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash -c "$(curl -fsSL https://raw.githubusercontent.com/roothide/theos/master/bin/install-theos)"
+      - name: Build YTKACE dylib only (no DEB)
+        run: |
+          set -euo pipefail
+          make clean || true
+          make FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless DISABLE_ROOTLESS_COMPAT_WARNING=1
+          mkdir -p built-ytkace
+          lib="$(find .theos/obj -type f -name 'YTKACE.dylib' -print -quit)"
+          test -n "$lib" || { echo 'YTKACE.dylib missing after make' >&2; exit 1; }
+          cp "$lib" built-ytkace/YTKACE.dylib
+      - uses: actions/upload-artifact@v7
+        with:
+          name: YTKACE-library
+          path: built-ytkace/YTKACE.dylib
+          if-no-files-found: error
 
   extra-tweaks:
-    runs-on: ubuntu-24.04
+    runs-on: ${{ inputs.add_ytuhd && 'macos-15' || 'ubuntu-24.04' }}
     env:
       THEOS: ${{ github.workspace }}/.theos
       CI: 'true'
@@ -45,6 +88,13 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: bash -c "$(curl -fsSL https://raw.githubusercontent.com/roothide/theos/master/bin/install-theos)"
+
+      - name: Build tools for YTUHD (selected only)
+        if: ${{ inputs.add_ytuhd }}
+        run: |
+          set -euo pipefail
+          brew install meson ninja pkg-config autoconf automake libtool nasm yasm
+          xcrun --sdk iphoneos --show-sdk-path
 
       - name: Install shared headers
         run: |
@@ -58,9 +108,14 @@ jobs:
       - name: Build selected tweaks
         env:
           ADD_RYD: ${{ inputs.add_ryd }}
+          ADD_YTUHD: ${{ inputs.add_ytuhd }}
           ADD_YTABCONFIG: ${{ inputs.add_ytabconfig }}
+          ADD_YOUQUALITY: ${{ inputs.add_youquality }}
           ADD_YOUSLIDER: ${{ inputs.add_youslider }}
+          ADD_YOUMUTE: ${{ inputs.add_youmute }}
+          ADD_YTSILENTVOTE: ${{ inputs.add_ytsilentvote }}
           ADD_DONTEATMYCONTENT: ${{ inputs.add_donteatmycontent }}
+          ADD_YOUGETCAPTION: ${{ inputs.add_yougetcaption }}
         run: |
           set -euo pipefail
           mkdir -p extra-built sources
@@ -73,6 +128,9 @@ jobs:
             fi
             echo "Building $key from $repo"
             local checkout="sources/$key"
+            if [[ "$key" == ytvideooverlay ]]; then
+              checkout="sources/YTVideoOverlay"
+            fi
             git clone --depth 1 --recurse-submodules "https://github.com/${repo}.git" "$checkout"
             pushd "$checkout"
 
@@ -95,23 +153,49 @@ jobs:
             fi
 
             make clean || true
-            make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless DISABLE_ROOTLESS_COMPAT_WARNING=1
-            deb="$(find packages -maxdepth 1 -name '*.deb' -print -quit)"
-            test -n "$deb" || { echo "No DEB from $key" >&2; exit 1; }
-            cp "$deb" "../../extra-built/${key}.deb"
+            if [[ "$key" == ytuhd ]]; then
+              git submodule update --init --recursive
+              make libvpx
+              make dav1d
+              make SIDELOAD=1 FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless DISABLE_ROOTLESS_COMPAT_WARNING=1
+            else
+              make FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless DISABLE_ROOTLESS_COMPAT_WARNING=1
+            fi
+            mkdir -p "../../extra-built/$key"
+            libs=()
+            while IFS= read -r lib; do
+              libs+=("$lib")
+            done < <(find .theos/obj -type f -name '*.dylib' -print | sort)
+            if (( ${#libs[@]} == 0 )); then
+              echo "No dylib built for $key" >&2
+              exit 1
+            fi
+            for lib in "${libs[@]}"; do
+              cp "$lib" "../../extra-built/$key/$(basename "$lib")"
+            done
             popd
           }
 
+          # Build dependencies first. YTVideoOverlay is needed by the three
+          # overlay clients; it is never built on the default safe profile.
+          if [[ "$ADD_YOUQUALITY" == true || "$ADD_YOUMUTE" == true || "$ADD_YOUGETCAPTION" == true ]]; then
+            build_tweak ytvideooverlay PoomSmart/YTVideoOverlay true
+          fi
           build_tweak ryd PoomSmart/Return-YouTube-Dislikes "$ADD_RYD"
+          build_tweak ytuhd PoomSmart/YTUHD "$ADD_YTUHD"
           build_tweak ytabconfig PoomSmart/YTABConfig "$ADD_YTABCONFIG"
+          build_tweak youquality PoomSmart/YouQuality "$ADD_YOUQUALITY"
           build_tweak youslider PoomSmart/YouSlider "$ADD_YOUSLIDER"
+          build_tweak youmute PoomSmart/YouMute "$ADD_YOUMUTE"
+          build_tweak ytsilentvote PoomSmart/YTSilentVote "$ADD_YTSILENTVOTE"
           build_tweak donteatmycontent therealFoxster/DontEatMyContent "$ADD_DONTEATMYCONTENT"
-          printf 'Selected tweak packages.\n' > extra-built/README.txt
-          find extra-built -maxdepth 1 -name '*.deb' -print | sort
+          build_tweak yougetcaption PoomSmart/YouGetCaption "$ADD_YOUGETCAPTION"
+          printf 'Selected tweak dylibs (not DEB packages).\n' > extra-built/README.txt
+          find extra-built -type f -name '*.dylib' -print | sort
 
       - uses: actions/upload-artifact@v7
         with:
-          name: YTKACE-selected-extra-debs
+          name: YTKACE-selected-extra-libraries
           path: extra-built/
           if-no-files-found: error
 
@@ -122,14 +206,14 @@ jobs:
       - uses: actions/checkout@v6
       - uses: actions/download-artifact@v8
         with:
-          name: YTKACE-deb-rootless
-          path: packages
+          name: YTKACE-library
+          path: built-ytkace
       - uses: actions/download-artifact@v8
         with:
-          name: YTKACE-selected-extra-debs
-          path: extra-packages
+          name: YTKACE-selected-extra-libraries
+          path: extra-root
       - name: Install packaging tools
-        run: brew install ldid dpkg
+        run: brew install ldid
       - name: Download decrypted IPA
         env:
           IPA_URL: ${{ inputs.ipa_url }}
@@ -153,9 +237,7 @@ jobs:
           ADD_RYD: ${{ inputs.add_ryd }}
         run: |
           set -euo pipefail
-          mkdir -p deb-root
-          dpkg-deb -x "$(find packages -maxdepth 1 -name '*.deb' -print -quit)" deb-root
-          ytkace="$(find deb-root -name YTKACE.dylib -print -quit)"
+          ytkace="$(find built-ytkace -name YTKACE.dylib -print -quit)"
           test -n "$ytkace"
           export LDID="$(brew --prefix)/bin/ldid"
           version="$(awk '/^Version:/ {print $2}' control)"
@@ -167,31 +249,21 @@ jobs:
           PYVERSION
           )"
           output="YouTube_${youtube_version}_YTKACE_${version}.ipa"
-          mkdir -p extra-root
-          # Extract all selected tweaks first; no library is injected until vetted.
-          shopt -s nullglob
-          for deb in extra-packages/*.deb; do
-            key="$(basename "$deb" .deb)"
-            mkdir -p "extra-root/$key"
-            dpkg-deb -x "$deb" "extra-root/$key"
-          done
-          # Permanently exclude YTSilentVote as well as previously blocked tweaks.
-          # No blanket substrate filter is used.
-          # Each selected package must provide exactly one unique dylib.
+          # Extra dylibs were built directly from source; no DEB is generated.
+          test -d extra-root
+          # Include precisely the explicitly selected tweak libraries.
+          # Defaults: RYD ON, all other tweaks OFF.
+          # No blanket dependency filtering; these are user-selected builds.
           python3 - <<'PYSELECT'
           from pathlib import Path
           import sys
           root = Path('extra-root')
           libs = sorted(p for p in root.rglob('*.dylib') if p.is_file())
-          excluded = {'ytuhd', 'youquality', 'youmute', 'yougetcaption', 'ytvideooverlay', 'ytsilentvote'}
           names = set()
           selected = []
           ryd_selected = []
           for lib in libs:
               key = lib.relative_to(root).parts[0].lower()
-              if key in excluded or lib.name.lower() in {'ytvideooverlay.dylib', 'ytsilentvote.dylib'}:
-                  print('SKIP blocked tweak:', lib)
-                  continue
               if lib.name in names:
                   sys.exit('Duplicate dylib name: ' + lib.name)
               names.add(lib.name)
@@ -199,15 +271,17 @@ jobs:
               if key == 'ryd':
                   ryd_selected.append(lib.name)
               print('INCLUDED:', lib.name)
-          if Path('extra-root/ryd').exists() and not ryd_selected:
-              sys.exit('RYD package exists but no RYD dylib was selected')
           Path('ryd-dylibs.txt').write_text(''.join(name + '\n' for name in ryd_selected))
           print('RYD selected libraries:', ryd_selected)
           Path('selected-dylibs.txt').write_text(''.join(str(p) + '\n' for p in selected))
           print(f'Selected {len(selected)} additional dylibs')
           PYSELECT
           if [[ "$ADD_RYD" == true && ! -s ryd-dylibs.txt ]]; then
-            echo 'ERROR: RYD was enabled but no RYD dylib was selected' >&2
+            echo 'ERROR: RYD enabled but its library is missing' >&2
+            exit 1
+          fi
+          if [[ "$ADD_RYD" != true && -s ryd-dylibs.txt ]]; then
+            echo 'ERROR: RYD disabled but its library is present' >&2
             exit 1
           fi
           dylibs=()
@@ -234,11 +308,8 @@ jobs:
               ryd_names = pathlib.Path('ryd-dylibs.txt').read_text().splitlines()
               for name in ryd_names:
                   assert any(p.endswith('/Frameworks/' + name) for p in files), f'Missing RYD library: {name}'
-              forbidden = {'ytsilentvote.dylib', 'ytuhd.dylib', 'ytvideooverlay.dylib'}
-              unwanted = [p for p in files if p.startswith('Payload/') and '/Frameworks/' in p and pathlib.PurePosixPath(p).name.lower() in forbidden]
-              assert not unwanted, f'Forbidden dylibs are still inside IPA: {unwanted}'
               print('RYD libraries inside IPA:', ryd_names)
-          print('All requested dylibs are present; blocked dylibs are absent')
+          print('All selected tweak dylibs are present')
           PYVERIFY
           echo "ipa=$output" >> "$GITHUB_OUTPUT"
       - name: Report included tweaks
@@ -249,9 +320,8 @@ jobs:
             echo '### Injected extra dylibs' >> "$GITHUB_STEP_SUMMARY"
             cat selected-dylibs.txt >> "$GITHUB_STEP_SUMMARY"
             echo '' >> "$GITHUB_STEP_SUMMARY"
-            echo 'YTSilentVote: permanently excluded' >> "$GITHUB_STEP_SUMMARY"
             if [[ -s ryd-dylibs.txt ]]; then
-              echo 'RYD: included and verified' >> "$GITHUB_STEP_SUMMARY"
+              echo 'RYD: enabled and verified' >> "$GITHUB_STEP_SUMMARY"
               cat ryd-dylibs.txt >> "$GITHUB_STEP_SUMMARY"
             else
               echo 'RYD: not selected' >> "$GITHUB_STEP_SUMMARY"
