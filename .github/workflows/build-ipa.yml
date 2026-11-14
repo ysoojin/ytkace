@@ -258,9 +258,15 @@ jobs:
                   return result
               return []
 
+          # Only the requested RYD tweak, never any of its bundled helpers.
+          # Other tweak choices keep their existing collection behaviour.
+          expected_names = {'ryd': {'YouTubeDislikesReturn.dylib'}}
           candidates = sorted(root.rglob('*.dylib'))
           picked = {}
           for lib in candidates:
+              if key in expected_names and lib.name not in expected_names[key]:
+                  print(f'SKIP unrelated RYD library: {lib}')
+                  continue
               if any(part.lower().endswith('.dsym') for part in lib.parts):
                   print(f'SKIP dSYM bundle: {lib}')
                   continue
@@ -276,6 +282,8 @@ jobs:
 
           if not picked:
               sys.exit(f'ERROR [{key}]: no valid MH_DYLIB found; refusing to package dSYM')
+          if key == 'ryd' and set(picked) != expected_names['ryd']:
+              sys.exit(f'ERROR [ryd]: expected only YouTubeDislikesReturn.dylib, got {sorted(picked)}')
 
           destination.mkdir(parents=True, exist_ok=True)
           for name, lib in sorted(picked.items()):
@@ -307,6 +315,8 @@ jobs:
           find extra-built -type f -name '*.dylib' -print | sort
 
       - name: Prepare Sideloadly tweak files
+        env:
+          RYD_ONLY: ${{ (inputs.add_ryd || inputs.add_ryd_direct) && !inputs.add_ytuhd && !inputs.add_ytabconfig && !inputs.add_youquality && !inputs.add_youslider && !inputs.add_youmute && !inputs.add_ytsilentvote && !inputs.add_donteatmycontent && !inputs.add_yougetcaption }}
         run: |
           set -euo pipefail
           mkdir -p sideloadly-tweaks
@@ -316,6 +326,14 @@ jobs:
           source=Path('extra-built')
           target=Path('sideloadly-tweaks')
           libraries=sorted(source.rglob('*.dylib'))
+          # If only RYD was requested, reject any unrelated file rather than
+          # accidentally publishing helpers or stale outputs from the checkout.
+          import os
+          if os.environ.get('RYD_ONLY', '').lower() == 'true':
+              expected = {'YouTubeDislikesReturn.dylib'}
+              actual = {p.name for p in libraries}
+              if actual != expected or len(libraries) != 1:
+                  sys.exit(f'ERROR: RYD-only build must contain exactly {expected}, got {libraries}')
           names=set()
           lines=['Sideloadly optional tweak libraries',
                  'Extract this artifact ZIP and select desired .dylib files in Sideloadly.',
@@ -348,6 +366,7 @@ jobs:
             echo 'ERROR: RYD was selected, but YouTubeDislikesReturn.dylib is missing' >&2
             exit 1
           }
+          # The dedicated RYD artifact must never contain other dylibs.
           mkdir -p ryd-for-sideloadly
           cp sideloadly-tweaks/YouTubeDislikesReturn.dylib ryd-for-sideloadly/
           printf '%s\n' \
