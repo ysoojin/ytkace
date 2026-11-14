@@ -1,4 +1,4 @@
-name: IPA (YTKACE + optional prebuilt tweak injection)
+name: IPA (YTKACE + selected tweaks, IPA and DEB)
 
 on:
   workflow_dispatch:
@@ -9,45 +9,49 @@ on:
         type: string
         default: 'https://www.dropbox.com/scl/fi/odyv50o9pgx7fh8nr8u5h/com.google.ios.youtube-21.45.4-Decrypted.ipa?rlkey=q8sq80ak1t8qr0pwe1t8f448e&st=tqx7k2kt&dl=1'
       add_ryd:
-        description: RYD direct IPA injection (prebuilt; default OFF)
+        description: RYD optional IPA injection (default OFF; may require Substrate)
+        type: boolean
+        default: false
+      add_ryd_direct:
+        description: RYD direct IPA injection (legacy option, default OFF)
         type: boolean
         default: false
       add_ytuhd:
-        description: YTUHD direct IPA injection (prebuilt; default OFF)
+        description: YTUHD (jailbreak-only dependency observed; default OFF)
         type: boolean
         default: false
       add_ytabconfig:
-        description: YTABConfig direct IPA injection (prebuilt; default OFF)
+        description: YTABConfig (crashes on non-jailbroken phone; default OFF)
         type: boolean
         default: false
       add_youquality:
-        description: YouQuality direct IPA injection (requires prebuilt YTVideoOverlay; default OFF)
+        description: YouQuality (requires YTVideoOverlay; default OFF)
         type: boolean
         default: false
       add_youslider:
-        description: YouSlider direct IPA injection (prebuilt; default OFF)
+        description: YouSlider (crashes on non-jailbroken phone; default OFF)
         type: boolean
         default: false
       add_youmute:
-        description: YouMute direct IPA injection (requires prebuilt YTVideoOverlay; default OFF)
+        description: YouMute (requires YTVideoOverlay; default OFF)
         type: boolean
         default: false
       add_ytsilentvote:
-        description: YTSilentVote direct IPA injection (prebuilt; default OFF)
+        description: YTSilentVote (jailbreak-only dependency observed; default OFF)
         type: boolean
         default: false
       add_donteatmycontent:
-        description: DontEatMyContent direct IPA injection (prebuilt; default OFF)
+        description: DontEatMyContent (untested; default OFF)
         type: boolean
         default: false
       add_yougetcaption:
-        description: YouGetCaption direct IPA injection (requires prebuilt YTVideoOverlay; default OFF)
+        description: YouGetCaption (requires YTVideoOverlay; default OFF)
         type: boolean
         default: false
 
 permissions:
   contents: write
-  actions: read
+  actions: write
 
 jobs:
   ytkace:
@@ -110,41 +114,30 @@ jobs:
           if-no-files-found: error
 
   package:
-    needs: [ytkace]
-    runs-on: macos-latest
+    needs: ytkace
+    runs-on: macos-15
     env:
-      GH_TOKEN: ${{ github.token }}
-      REPO: ${{ github.repository }}
-      # Optional repository variable. If blank, use latest published release.
-      PREBUILT_RELEASE_TAG: ${{ vars.TWEAK_RELEASE_TAG }}
+      THEOS: ${{ github.workspace }}/.theos
+      CI: 'true'
     steps:
       - uses: actions/checkout@v6
       - uses: actions/download-artifact@v8
         with:
           name: YTKACE-library
           path: built-ytkace
-      - name: Install signing tool
+      - name: Install IPA tools
         run: brew install ldid
-      - name: Download decrypted YouTube IPA
+      - name: Install Theos for selected tweaks
+        if: ${{ inputs.add_ryd || inputs.add_ryd_direct || inputs.add_ytuhd || inputs.add_ytabconfig || inputs.add_youquality || inputs.add_youslider || inputs.add_youmute || inputs.add_ytsilentvote || inputs.add_donteatmycontent || inputs.add_yougetcaption }}
         env:
-          IPA_URL: ${{ inputs.ipa_url }}
-        shell: bash
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          if [[ "$IPA_URL" == "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/assets/"* ]]; then
-            curl -fL --retry 3 -H 'Accept: application/octet-stream' -H "Authorization: Bearer $GH_TOKEN" "$IPA_URL" -o YouTube.ipa
-          else
-            curl -fL --retry 3 "$IPA_URL" -o YouTube.ipa
-          fi
-          python3 - <<'PYVALIDATE'
-          import zipfile
-          assert zipfile.is_zipfile('YouTube.ipa'), 'Not a valid IPA/ZIP'
-          with zipfile.ZipFile('YouTube.ipa') as z:
-              assert any(p.startswith('Payload/') and p.endswith('.app/Info.plist') for p in z.namelist())
-          PYVALIDATE
-      - name: Resolve only checked prebuilt tweak libraries (NO extra tweak compilation)
+          bash -c "$(curl -fsSL https://raw.githubusercontent.com/roothide/theos/master/bin/install-theos)" || echo "WARN: optional Theos install failed; selected tweak builds may be skipped"
+      - name: Build selected tweaks together (no tweak artifacts; failures are skipped)
         env:
           ADD_RYD: ${{ inputs.add_ryd }}
+          ADD_RYD_DIRECT: ${{ inputs.add_ryd_direct }}
           ADD_YTUHD: ${{ inputs.add_ytuhd }}
           ADD_YTABCONFIG: ${{ inputs.add_ytabconfig }}
           ADD_YOUQUALITY: ${{ inputs.add_youquality }}
@@ -156,122 +149,209 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p selected-dylibs
-          selected=()
-          [[ "$ADD_RYD" == true ]] && selected+=(YouTubeDislikesReturn.dylib)
-          [[ "$ADD_YTUHD" == true ]] && selected+=(YTUHD.dylib)
-          [[ "$ADD_YTABCONFIG" == true ]] && selected+=(YTABConfig.dylib)
-          [[ "$ADD_YOUQUALITY" == true ]] && selected+=(YouQuality.dylib)
-          [[ "$ADD_YOUSLIDER" == true ]] && selected+=(YouSlider.dylib)
-          [[ "$ADD_YOUMUTE" == true ]] && selected+=(YouMute.dylib)
-          [[ "$ADD_YTSILENTVOTE" == true ]] && selected+=(YTSilentVote.dylib)
-          [[ "$ADD_DONTEATMYCONTENT" == true ]] && selected+=(DontEatMyContent.dylib)
-          [[ "$ADD_YOUGETCAPTION" == true ]] && selected+=(YouGetCaption.dylib)
-          if [[ "$ADD_YOUQUALITY" == true || "$ADD_YOUMUTE" == true || "$ADD_YOUGETCAPTION" == true ]]; then
-            selected+=(YTVideoOverlay.dylib)
+          mkdir -p extra-inject sources
+          : > selected-success.txt
+          : > selected-failed.txt
+          # Keep this step successful when an optional tweak fails;
+          # never publish an invalid binary from a failed build.
+          mkdir -p "$THEOS/include"
+          git clone --depth 1 https://github.com/PoomSmart/PSHeader.git "$THEOS/include/PSHeader" || echo 'WARN: PSHeader unavailable'
+          git clone --depth 1 https://github.com/PoomSmart/YouTubeHeader.git "$THEOS/include/YouTubeHeader" || echo 'WARN: YouTubeHeader unavailable'
+          if [[ "$ADD_YTUHD" == true ]]; then
+            brew install meson ninja pkg-config autoconf automake libtool nasm yasm || echo 'WARN: YTUHD build tools setup failed'
           fi
-          # Empty selection is valid. No extra .dylib is fetched or injected.
-          if (( ${#selected[@]} == 0 )); then
-            echo 'All additional tweaks OFF: YTKACE only.'
-            exit 0
-          fi
-          release_tag="$PREBUILT_RELEASE_TAG"
-          for name in "${selected[@]}"; do
-            if [[ -s "prebuilt-tweaks/$name" ]]; then
-              cp "prebuilt-tweaks/$name" "selected-dylibs/$name"
-              echo "LOCAL PREBUILT: $name"
-            else
-              if [[ -z "$release_tag" ]]; then
-                release_tag="$(gh release view --repo "$REPO" --json tagName --jq .tagName 2>/dev/null || true)"
-              fi
-              if [[ -z "$release_tag" ]]; then
-                echo "ERROR: $name missing from prebuilt-tweaks/ and no GitHub Release available." >&2
-                exit 1
-              fi
-              echo "Fetching $name from Release $release_tag"
-              gh release download "$release_tag" --repo "$REPO" --pattern "$name" --dir selected-dylibs || {
-                echo "ERROR: $name not found in Release $release_tag. Add prebuilt-tweaks/$name or set repository variable TWEAK_RELEASE_TAG to a release that contains it." >&2
-                exit 1
-              }
+
+          build_one() {
+            local key="$1" repo="$2" flag="$3" out="sources/$1"
+            [[ "$flag" == true ]] || return 0
+            echo "::group::Building optional tweak $key"
+            if ! git clone --depth 1 --recurse-submodules "https://github.com/$repo.git" "$out"; then
+              echo "FAILED $key: git clone" | tee -a selected-failed.txt
+              echo '::endgroup::'
+              return 0
             fi
-            test -s "selected-dylibs/$name" || { echo "ERROR: Empty or missing: $name" >&2; exit 1; }
-          done
-          python3 - <<'PYMACHO'
+            if [[ "$key" == donteatmycontent ]]; then
+              python3 - "$out" <<'PY_PATCH'
           from pathlib import Path
-          import struct
-          thin={b'\xfe\xed\xfa\xce':'>',b'\xce\xfa\xed\xfe':'<',b'\xfe\xed\xfa\xcf':'>',b'\xcf\xfa\xed\xfe':'<'}
-          for p in sorted(Path('selected-dylibs').glob('*.dylib')):
+          import sys
+          d=Path(sys.argv[1]); h=d/'Tweak.h'; t=d/'Tweak.x'
+          if h.exists() and t.exists():
+              hs=h.read_text(); ts=t.read_text()
+              if hs.count('CGFloat constant;')==1 and '#import "Tweak.h"' in ts:
+                  h.write_text(hs.replace('CGFloat constant;','extern CGFloat constant;',1))
+                  t.write_text(ts.replace('#import "Tweak.h"','#import "Tweak.h"\nCGFloat constant;',1))
+          PY_PATCH
+            fi
+            # Run compilation in a contained command, so a single optional
+            # failure cannot abort the entire IPA build.
+            if ! ( cd "$out" && make clean >/dev/null 2>&1 || true
+                   cd "$GITHUB_WORKSPACE/$out"
+                   if [[ "$key" == ytuhd ]]; then
+                     make libvpx && make dav1d && make SIDELOAD=1 FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless DISABLE_ROOTLESS_COMPAT_WARNING=1
+                   else
+                     make FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless DISABLE_ROOTLESS_COMPAT_WARNING=1
+                   fi ); then
+              echo "FAILED $key: make" | tee -a selected-failed.txt
+              echo '::endgroup::'
+              return 0
+            fi
+            # Inspect Mach-O headers to reject MH_DSYM (type 10).
+            if python3 - "$key" "$out/.theos/obj" extra-inject <<'PY_PICK'
+          from pathlib import Path
+          import struct,sys,shutil
+          key,src,dst=sys.argv[1:]
+          root=Path(src); dest=Path(dst)
+          magic={b'\xfe\xed\xfa\xce':'>',b'\xce\xfa\xed\xfe':'<',b'\xfe\xed\xfa\xcf':'>',b'\xcf\xfa\xed\xfe':'<'}
+          expect={'ryd':{'YouTubeDislikesReturn.dylib'}}
+          found=[]
+          for p in sorted(root.rglob('*.dylib')):
+              if any(x.lower().endswith('.dsym') for x in p.parts):continue
+              if key in expect and p.name not in expect[key]:continue
               with p.open('rb') as f:
-                  magic=f.read(4)
-                  if magic not in thin:
-                      raise SystemExit(f'Invalid or fat Mach-O, expecting thin MH_DYLIB: {p}; magic={magic.hex()}')
+                  m=f.read(4)
+                  if m not in magic:continue
                   f.seek(12)
-                  kind=struct.unpack(thin[magic]+'I',f.read(4))[0]
-              if kind!=6:
-                  raise SystemExit(f'Not an executable MH_DYLIB (type {kind}): {p}')
-              print('VALID PREBUILT:',p)
-          PYMACHO
-          echo 'Selected tweak libraries (will be embedded into IPA):'
-          find selected-dylibs -name '*.dylib' -type f -print | sort
-      - name: Inject YTKACE and checked prebuilt tweaks
+                  typ=struct.unpack(magic[m]+'I',f.read(4))[0]
+              if typ==6:found.append(p)
+          if not found:sys.exit('No real MH_DYLIB found for '+key)
+          if key in expect and {p.name for p in found}!=expect[key]:sys.exit('Wrong RYD library')
+          # Never accept duplicate filenames across selected tweaks.
+          files={}
+          for f in found:
+              if f.name in files: continue
+              if (dest/f.name).exists():sys.exit('Duplicate dylib name: '+f.name)
+              files[f.name]=f
+          # Validate the complete selection before copying any output.
+          for name,f in files.items():
+              shutil.copy2(f,dest/name)
+              print('INJECTABLE',key,name)
+          PY_PICK
+            then
+              echo "OK $key" | tee -a selected-success.txt
+            else
+              echo "FAILED $key: no valid dylib or duplicate" | tee -a selected-failed.txt
+            fi
+            echo '::endgroup::'
+          }
+
+          # Overlay source is needed for clients such as YouQuality and YouMute.
+          overlay=false
+          if [[ "$ADD_YOUQUALITY" == true || "$ADD_YOUMUTE" == true || "$ADD_YOUGETCAPTION" == true ]]; then
+            overlay=true
+          fi
+          build_one ytvideooverlay PoomSmart/YTVideoOverlay "$overlay"
+          # The overlay clients must not be packed if their shared dependency fails.
+          if [[ "$overlay" == true ]] && ! grep -qx 'OK ytvideooverlay' selected-success.txt; then
+            for key in youquality youmute yougetcaption; do
+              echo "FAILED $key: YTVideoOverlay dependency unavailable" >> selected-failed.txt
+            done
+            ADD_YOUQUALITY=false
+            ADD_YOUMUTE=false
+            ADD_YOUGETCAPTION=false
+          fi
+          if [[ "$ADD_RYD" == true || "$ADD_RYD_DIRECT" == true ]]; then
+            build_one ryd PoomSmart/Return-YouTube-Dislikes true
+          fi
+          build_one ytuhd PoomSmart/YTUHD "$ADD_YTUHD"
+          build_one ytabconfig PoomSmart/YTABConfig "$ADD_YTABCONFIG"
+          build_one youquality PoomSmart/YouQuality "$ADD_YOUQUALITY"
+          build_one youslider PoomSmart/YouSlider "$ADD_YOUSLIDER"
+          build_one youmute PoomSmart/YouMute "$ADD_YOUMUTE"
+          build_one ytsilentvote PoomSmart/YTSilentVote "$ADD_YTSILENTVOTE"
+          build_one donteatmycontent therealFoxster/DontEatMyContent "$ADD_DONTEATMYCONTENT"
+          build_one yougetcaption PoomSmart/YouGetCaption "$ADD_YOUGETCAPTION"
+          echo 'Successfully built libraries:'
+          find extra-inject -maxdepth 1 -type f -name '*.dylib' -print | sort
+          echo 'Skipped optional tweaks:'
+          cat selected-failed.txt
+
+      - name: Download decrypted IPA
+        env:
+          IPA_URL: ${{ inputs.ipa_url }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [[ "$IPA_URL" == "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/assets/"* ]]; then
+            curl -fL --retry 3 -H 'Accept: application/octet-stream' -H "Authorization: Bearer $GH_TOKEN" "$IPA_URL" -o YouTube.ipa
+          else
+            curl -fL --retry 3 "$IPA_URL" -o YouTube.ipa
+          fi
+          python3 - <<'PY_IPA'
+          import zipfile
+          assert zipfile.is_zipfile('YouTube.ipa'), 'Invalid IPA'
+          with zipfile.ZipFile('YouTube.ipa') as z:
+              assert any(x.startswith('Payload/') and x.endswith('.app/Info.plist') for x in z.namelist())
+          PY_IPA
+
+      - name: Package YTKACE and all successful optional tweaks as one IPA
         id: inject
         shell: bash
         run: |
           set -euo pipefail
-          export LDID="$(brew --prefix)/bin/ldid"
           ytkace=built-ytkace/YTKACE.dylib
           test -s "$ytkace"
+          export LDID="$(brew --prefix)/bin/ldid"
           version="$(awk '/^Version:/ {print $2}' control)"
-          youtube_version="$(python3 - <<'PY_VERSION'
-          import plistlib, zipfile
+          youtube_version="$(python3 - <<'PY_VER'
+          import plistlib,zipfile
           with zipfile.ZipFile('YouTube.ipa') as z:
-              info=next(n for n in z.namelist() if n.startswith('Payload/') and n.endswith('.app/Info.plist'))
+              info=next(x for x in z.namelist() if x.startswith('Payload/') and x.endswith('.app/Info.plist'))
               print(plistlib.loads(z.read(info))['CFBundleShortVersionString'])
-          PY_VERSION
+          PY_VER
           )"
           output="YouTube_${youtube_version}_YTKACE_${version}.ipa"
           bash Scripts/sideload-repack.sh YouTube.ipa "$ytkace" "$output"
-          shopt -s nullglob
-          extras=(selected-dylibs/*.dylib)
-          if (( ${#extras[@]} )); then
+          if find extra-inject -maxdepth 1 -type f -name '*.dylib' | grep -q .; then
+            # Keep the known-good YTKACE-only IPA until injection and signing
+            # have both succeeded. An optional tweak can never destroy it.
             work="$(mktemp -d)"
             trap 'rm -rf "$work"' EXIT
-            unzip -q "$output" -d "$work"
-            app="$(find "$work/Payload" -mindepth 1 -maxdepth 1 -type d -name '*.app' -print -quit)"
-            test -n "$app"
-            main_name="$(python3 - "$app/Info.plist" <<'PY_MAIN'
+            if (
+              set -e
+              unzip -q "$output" -d "$work"
+              app="$(find "$work/Payload" -mindepth 1 -maxdepth 1 -type d -name '*.app' -print -quit)"
+              test -n "$app"
+              executable="$(python3 - "$app/Info.plist" <<'PY_MAIN'
           import plistlib,sys
-          with open(sys.argv[1],'rb') as f: print(plistlib.load(f)['CFBundleExecutable'])
+          with open(sys.argv[1],'rb') as f:print(plistlib.load(f)['CFBundleExecutable'])
           PY_MAIN
-            )"
-            mkdir -p "$app/Frameworks"
-            for lib in "${extras[@]}"; do
-              name="$(basename "$lib")"
-              cp "$lib" "$app/Frameworks/$name"
-              python3 Tools/macho_inject.py "$app/$main_name" --add-load "@rpath/$name"
-              echo "DIRECT INJECTION: $name"
-            done
-            bash Scripts/sign-bundle.sh "$app"
-            rm -f "$output"
-            (cd "$work" && zip -qry "$OLDPWD/$output" Payload)
+              )"
+              mkdir -p "$app/Frameworks"
+              while IFS= read -r -d '' lib; do
+                name="$(basename "$lib")"
+                cp "$lib" "$app/Frameworks/$name"
+                python3 Tools/macho_inject.py "$app/$executable" --add-load "@rpath/$name"
+              done < <(find extra-inject -maxdepth 1 -type f -name '*.dylib' -print0)
+              bash Scripts/sign-bundle.sh "$app"
+              (cd "$work" && zip -qry "$GITHUB_WORKSPACE/$output.optional" Payload)
+            ); then
+              mv -f "$output.optional" "$output"
+              echo 'Optional tweaks successfully bundled into IPA.'
+            else
+              rm -f "$output.optional"
+              echo 'WARN: optional tweak injection/signing failed; publishing YTKACE-only IPA.'
+              echo 'FAILED optional-injection: falling back to YTKACE-only IPA' >> selected-failed.txt
+              : > selected-success.txt
+            fi
           fi
           bash Tools/verify-artifacts.sh "$ytkace" "$output"
-          python3 - "$output" <<'PY_CHECK'
-          import sys,zipfile
-          from pathlib import Path
-          expected={p.name for p in Path('selected-dylibs').glob('*.dylib')}
-          with zipfile.ZipFile(sys.argv[1]) as z:
-              names={p.rsplit('/',1)[-1] for p in z.namelist() if '/Frameworks/' in p and p.endswith('.dylib')}
-          if 'YTKACE.dylib' not in names: raise SystemExit('YTKACE.dylib missing')
-          if not expected.issubset(names): raise SystemExit(f'Missing checked tweaks: {expected-names}')
-          forbidden={'YouTubeDislikesReturn.dylib','YTUHD.dylib','YTABConfig.dylib',
-                     'YouQuality.dylib','YouSlider.dylib','YouMute.dylib',
-                     'YTSilentVote.dylib','DontEatMyContent.dylib','YouGetCaption.dylib','YTVideoOverlay.dylib'}
-          extra=names & forbidden
-          if extra!=expected: raise SystemExit(f'Unexpected tweak injection: expected={expected}, got={extra}')
-          print('IPA verified. Injected:', sorted(expected))
-          PY_CHECK
           echo "ipa=$output" >> "$GITHUB_OUTPUT"
+          echo '## Optional tweak build results' >> "$GITHUB_STEP_SUMMARY"
+          echo '### Successfully built' >> "$GITHUB_STEP_SUMMARY"
+          if [[ -s selected-success.txt ]]; then cat selected-success.txt >> "$GITHUB_STEP_SUMMARY"; else echo 'None' >> "$GITHUB_STEP_SUMMARY"; fi
+          echo '### Actually included in final IPA' >> "$GITHUB_STEP_SUMMARY"
+          python3 - "$output" "$GITHUB_STEP_SUMMARY" <<'PY_FINAL'
+          import sys, zipfile
+          with zipfile.ZipFile(sys.argv[1]) as z:
+              libs=sorted({n.rsplit('/',1)[-1] for n in z.namelist()
+                           if '/Frameworks/' in n and n.endswith('.dylib')
+                           and not n.endswith('/YTKACE.dylib')})
+          with open(sys.argv[2],'a') as f:
+              f.write('\n'.join('- '+x for x in libs)+'\n' if libs else 'None (YTKACE only)\n')
+          PY_FINAL
+          echo '### Skipped or failed' >> "$GITHUB_STEP_SUMMARY"
+          if [[ -s selected-failed.txt ]]; then cat selected-failed.txt >> "$GITHUB_STEP_SUMMARY"; else echo 'None' >> "$GITHUB_STEP_SUMMARY"; fi
+
       - uses: actions/upload-artifact@v7
         with:
           name: YouTube-IPA
@@ -299,7 +379,7 @@ jobs:
         with:
           name: YTKACE-deb-rootless
           path: release-files/deb
-      - name: Validate and publish Release
+      - name: Validate and publish IPA plus DEB
         shell: bash
         run: |
           set -euo pipefail
@@ -307,19 +387,19 @@ jobs:
           ipas=(release-files/ipa/*.ipa)
           debs=(release-files/deb/*.deb)
           if (( ${#ipas[@]} != 1 || ${#debs[@]} != 1 )); then
-            printf 'Expected exactly one IPA and one DEB; found IPA=%d DEB=%d\n' "${#ipas[@]}" "${#debs[@]}" >&2
+            echo 'Expected exactly one IPA and one DEB' >&2
             exit 1
           fi
           dpkg-deb --info "${debs[0]}" >/dev/null
           assets=("${ipas[0]}" "${debs[0]}")
           sha256sum "${assets[@]}" > SHA256SUMS.txt
           assets+=(SHA256SUMS.txt)
+          notes='YTKACE IPA and Rootless DEB. Selected tweaks were built within the IPA packaging job; failed optional tweaks were skipped. See Actions run summary for the actual included libraries. No separate tweak dylib artifacts.'
           if gh release view "$RELEASE_TAG" --repo "$REPO" >/dev/null 2>&1; then
             gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber --repo "$REPO"
           else
             gh release create "$RELEASE_TAG" --repo "$REPO" --target "$GITHUB_SHA" \
               --title "YouTube IPA + YTKACE DEB (run $GITHUB_RUN_ID)" \
-              --notes "YTKACE IPA and Rootless DEB. Only checked, previously built tweak libraries are injected into IPA; no extra tweak compilation or individual dylib artifacts." \
-              "${assets[@]}"
+              --notes "$notes" "${assets[@]}"
           fi
           echo "https://github.com/$REPO/releases/tag/$RELEASE_TAG" >> "$GITHUB_STEP_SUMMARY"
