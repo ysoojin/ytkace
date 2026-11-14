@@ -12,6 +12,10 @@ on:
         description: RYD (.dylib) for Sideloadly - optional, default OFF
         type: boolean
         default: false
+      add_ryd_direct:
+        description: RYD direct IPA injection (future use; requires hooking runtime, default OFF)
+        type: boolean
+        default: false
       add_ytuhd:
         description: YTUHD (jailbreak-only dependency observed; default OFF)
         type: boolean
@@ -110,7 +114,7 @@ jobs:
           if-no-files-found: error
 
   extra-tweaks:
-    if: ${{ inputs.add_ryd || inputs.add_ytuhd || inputs.add_ytabconfig || inputs.add_youquality || inputs.add_youslider || inputs.add_youmute || inputs.add_ytsilentvote || inputs.add_donteatmycontent || inputs.add_yougetcaption }}
+    if: ${{ inputs.add_ryd || inputs.add_ryd_direct || inputs.add_ytuhd || inputs.add_ytabconfig || inputs.add_youquality || inputs.add_youslider || inputs.add_youmute || inputs.add_ytsilentvote || inputs.add_donteatmycontent || inputs.add_yougetcaption }}
     runs-on: ${{ inputs.add_ytuhd && 'macos-15' || 'ubuntu-24.04' }}
     env:
       THEOS: ${{ github.workspace }}/.theos
@@ -142,6 +146,7 @@ jobs:
       - name: Build selected tweaks
         env:
           ADD_RYD: ${{ inputs.add_ryd }}
+          ADD_RYD_DIRECT: ${{ inputs.add_ryd_direct }}
           ADD_YTUHD: ${{ inputs.add_ytuhd }}
           ADD_YTABCONFIG: ${{ inputs.add_ytabconfig }}
           ADD_YOUQUALITY: ${{ inputs.add_youquality }}
@@ -285,7 +290,11 @@ jobs:
           if [[ "$ADD_YOUQUALITY" == true || "$ADD_YOUMUTE" == true || "$ADD_YOUGETCAPTION" == true ]]; then
             build_tweak ytvideooverlay PoomSmart/YTVideoOverlay true
           fi
-          build_tweak ryd PoomSmart/Return-YouTube-Dislikes "$ADD_RYD"
+          if [[ "$ADD_RYD" == true || "$ADD_RYD_DIRECT" == true ]]; then
+            build_tweak ryd PoomSmart/Return-YouTube-Dislikes true
+          else
+            echo 'SKIP ryd (both RYD options OFF)'
+          fi
           build_tweak ytuhd PoomSmart/YTUHD "$ADD_YTUHD"
           build_tweak ytabconfig PoomSmart/YTABConfig "$ADD_YTABCONFIG"
           build_tweak youquality PoomSmart/YouQuality "$ADD_YOUQUALITY"
@@ -356,7 +365,10 @@ jobs:
           if-no-files-found: error
 
   package:
-    needs: [ytkace]
+    needs: [ytkace, extra-tweaks]
+    # The extra-tweaks job is skipped when all optional inputs are OFF.
+    # A requested optional tweak build must succeed before IPA packaging proceeds.
+    if: ${{ always() && needs.ytkace.result == 'success' && (needs.extra-tweaks.result == 'success' || needs.extra-tweaks.result == 'skipped') }}
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v6
@@ -364,6 +376,12 @@ jobs:
         with:
           name: YTKACE-library
           path: built-ytkace
+      - name: Download RYD for direct IPA injection (only if enabled)
+        if: ${{ inputs.add_ryd_direct }}
+        uses: actions/download-artifact@v8
+        with:
+          name: Sideloadly-Selected-Tweaks
+          path: direct-ryd
       - name: Install packaging tools
         run: brew install ldid
       - name: Download decrypted IPA
@@ -383,8 +401,10 @@ jobs:
           with zipfile.ZipFile('YouTube.ipa') as z:
               assert any(n.startswith('Payload/') and n.endswith('.app/Info.plist') for n in z.namelist())
           PYVALIDATE
-      - name: Inject YTKACE only (optional tweaks remain separate)
+      - name: Inject YTKACE and optional direct RYD
         id: inject
+        env:
+          ADD_RYD_DIRECT: ${{ inputs.add_ryd_direct }}
         run: |
           set -euo pipefail
           ytkace="$(find built-ytkace -name YTKACE.dylib -type f -print -quit)"
@@ -400,20 +420,51 @@ jobs:
           )"
           output="YouTube_${youtube_version}_YTKACE_${version}.ipa"
           bash Scripts/sideload-repack.sh YouTube.ipa "$ytkace" "$output"
+          # Direct RYD is intentionally opt-in. On stock iOS this dylib can crash
+          # without a compatible Substrate/hooking runtime; it is NOT included by default.
+          if [[ "$ADD_RYD_DIRECT" == true ]]; then
+            test -s direct-ryd/YouTubeDislikesReturn.dylib || {
+              echo 'ERROR: direct RYD requested but compiled dylib is missing' >&2
+              exit 1
+            }
+            tmp="$(mktemp -d)"
+            trap 'rm -rf "$tmp"' EXIT
+            unzip -q "$output" -d "$tmp"
+            app="$(find "$tmp/Payload" -maxdepth 1 -mindepth 1 -type d -name '*.app' -print -quit)"
+            test -n "$app" || { echo 'Missing app in IPA' >&2; exit 1; }
+            main_name="$(python3 - "$app/Info.plist" <<'PY_MAIN'
+          import plistlib,sys
+          with open(sys.argv[1],'rb') as f:
+              print(plistlib.load(f)['CFBundleExecutable'])
+          PY_MAIN
+            )"
+            mkdir -p "$app/Frameworks"
+            cp direct-ryd/YouTubeDislikesReturn.dylib "$app/Frameworks/YouTubeDislikesReturn.dylib"
+            python3 Tools/macho_inject.py "$app/$main_name" --add-load '@rpath/YouTubeDislikesReturn.dylib'
+            export LDID="$(brew --prefix)/bin/ldid"
+            bash Scripts/sign-bundle.sh "$app"
+            rm -f "$output"
+            (cd "$tmp" && zip -qry "$OLDPWD/$output" Payload)
+            echo 'WARNING: RYD directly injected; CydiaSubstrate runtime is NOT automatically bundled.'
+          fi
           bash Tools/verify-artifacts.sh "$ytkace" "$output"
-          python3 - "$output" <<'PY_VERIFY'
+          python3 - "$output" "$ADD_RYD_DIRECT" <<'PY_VERIFY'
           import sys,zipfile
           with zipfile.ZipFile(sys.argv[1]) as archive:
               libs=[x for x in archive.namelist() if '/Frameworks/' in x and x.endswith('.dylib')]
               if not any(x.endswith('/Frameworks/YTKACE.dylib') for x in libs):
                   sys.exit('YTKACE missing from IPA')
+              direct = (sys.argv[2] == 'true')
+              ryd_present = any(x.endswith('/Frameworks/YouTubeDislikesReturn.dylib') for x in libs)
+              if ryd_present != direct:
+                  sys.exit(f'RYD direct inclusion mismatch: requested={direct}, found={ryd_present}')
               unexpected=[x for x in libs if x.rsplit('/',1)[-1] in {
-                  'YouTubeDislikesReturn.dylib','YTVideoOverlay.dylib',
+                  'YTVideoOverlay.dylib',
                   'YTUHD.dylib','YTABConfig.dylib','YouSlider.dylib',
                   'YTSilentVote.dylib','YouMute.dylib','YouQuality.dylib',
                   'DontEatMyContent.dylib','YouGetCaption.dylib'}]
               if unexpected:sys.exit('Unexpected optional tweak embedded in IPA: '+str(unexpected))
-          print('IPA verified: YTKACE only; optional tweaks are separate')
+          print('IPA verified: YTKACE present; direct RYD matches checkbox; other tweaks separate')
           PY_VERIFY
           echo "ipa=$output" >> "$GITHUB_OUTPUT"
 
