@@ -65,8 +65,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # Theos installer can leave incompatible Clang precompiled modules.
+          # Isolate this run's module cache and avoid parallel module rebuild races.
+          rm -rf "${HOME}/.cache/clang/ModuleCache" "${THEOS}/obj"
+          export CLANG_MODULE_CACHE_PATH="${RUNNER_TEMP}/ytkace-clang-modules-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          mkdir -p "$CLANG_MODULE_CACHE_PATH"
           make clean
-          make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless DISABLE_ROOTLESS_COMPAT_WARNING=1
+          make -j1 package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless DISABLE_ROOTLESS_COMPAT_WARNING=1
           mkdir -p built-ytkace built-deb extracted
           shopt -s nullglob
           packages=(packages/*.deb)
