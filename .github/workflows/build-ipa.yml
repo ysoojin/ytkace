@@ -500,8 +500,25 @@ jobs:
           name: YTKACE-deb-rootless
           path: release-files/deb
 
+      - name: Download selected Sideloadly tweak files
+        if: ${{ needs.extra-tweaks.result == 'success' }}
+        uses: actions/download-artifact@v8
+        with:
+          name: Sideloadly-Selected-Tweaks
+          path: release-files/sideloadly-selected
+
+      - name: Download RYD-for-Sideloadly
+        if: ${{ inputs.add_ryd }}
+        uses: actions/download-artifact@v8
+        with:
+          name: RYD-for-Sideloadly
+          path: release-files/ryd-for-sideloadly
+
       - name: Validate and publish release
         shell: bash
+        env:
+          RYD_FOR_SIDELOADLY: ${{ inputs.add_ryd }}
+          EXTRA_TWEAKS_RESULT: ${{ needs.extra-tweaks.result }}
         run: |
           set -euo pipefail
           shopt -s nullglob
@@ -518,17 +535,62 @@ jobs:
                   raise SystemExit('IPA missing Payload/*.app/Info.plist')
           PY_IPA
           dpkg-deb --info "${debs[0]}" >/dev/null
-          sha256sum "${ipas[0]}" "${debs[0]}" > SHA256SUMS.txt
+
+          # Upload raw .dylib files to Releases, not ZIP archives.
+          # The Actions artifact downloads are ZIP by GitHub design.
+          mkdir -p release-files/release-attachments
+          if [[ "$EXTRA_TWEAKS_RESULT" == success ]]; then
+            test -s release-files/sideloadly-selected/README.txt || {
+              echo 'Missing selected tweaks artifact' >&2; exit 1;
+            }
+            # Copy files into one flat release directory. Fail rather than
+            # silently overwriting a same-named library from another tweak.
+            while IFS= read -r -d '' dylib; do
+              dest="release-files/release-attachments/$(basename "$dylib")"
+              if [[ -e "$dest" ]]; then
+                echo "Duplicate release .dylib name: $dest" >&2
+                exit 1
+              fi
+              cp "$dylib" "$dest"
+              echo "RELEASE DYLIB: $(basename "$dest")"
+            done < <(find release-files/sideloadly-selected -type f -name '*.dylib' -print0)
+          fi
+          if [[ "$RYD_FOR_SIDELOADLY" == true ]]; then
+            ryd=release-files/ryd-for-sideloadly/YouTubeDislikesReturn.dylib
+            test -s "$ryd" || {
+              echo 'RYD for Sideloadly selected, but its library is missing' >&2; exit 1;
+            }
+            dest=release-files/release-attachments/YouTubeDislikesReturn.dylib
+            if [[ -f "$dest" ]]; then
+              cmp -s "$ryd" "$dest" || {
+                echo 'RYD library differs between artifacts' >&2; exit 1;
+              }
+            else
+              cp "$ryd" "$dest"
+            fi
+          fi
+          extras=(release-files/release-attachments/*.dylib)
+          if [[ "$RYD_FOR_SIDELOADLY" == true ]]; then
+            test -s release-files/release-attachments/YouTubeDislikesReturn.dylib
+          fi
+
+          assets=("${ipas[0]}" "${debs[0]}" "${extras[@]}")
+          sha256sum "${assets[@]}" > SHA256SUMS.txt
+          assets+=(SHA256SUMS.txt)
+          notes="YTKACE IPA and Rootless DEB. Optional Sideloadly tweak libraries are attached as individual .dylib files when selected. RYD direct IPA injection is a separate opt-in option and requires a compatible hooking runtime."
           if gh release view "$RELEASE_TAG" --repo "$REPO" >/dev/null 2>&1; then
             echo "Release $RELEASE_TAG already exists; uploading updated assets."
-            gh release upload "$RELEASE_TAG" "${ipas[0]}" "${debs[0]}" SHA256SUMS.txt --clobber --repo "$REPO"
+            gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber --repo "$REPO"
           else
             gh release create "$RELEASE_TAG" \
               --repo "$REPO" \
               --target "$GITHUB_SHA" \
               --title "YouTube IPA + YTKACE DEB (run $GITHUB_RUN_ID)" \
-              --notes "YTKACE IPA and Rootless DEB. Additional selected tweaks (including Sideloadly RYD) are available only in the Actions artifacts for build run $GITHUB_RUN_ID; they are not automatically injected into the IPA unless direct injection was explicitly selected." \
-              "${ipas[0]}" "${debs[0]}" SHA256SUMS.txt
+              --notes "$notes" \
+              "${assets[@]}"
           fi
           echo "### GitHub Release" >> "$GITHUB_STEP_SUMMARY"
           echo "https://github.com/$REPO/releases/tag/$RELEASE_TAG" >> "$GITHUB_STEP_SUMMARY"
+          if (( ${#extras[@]} > 0 )); then
+            printf 'Additional release assets: %s\n' "${extras[*]}" >> "$GITHUB_STEP_SUMMARY"
+          fi
