@@ -380,6 +380,8 @@ jobs:
           optional_debs=(extra-debs/*.deb)
           built_debs=(built-deb/*.deb)
           runtime_files=(optional-runtime/*)
+          # Bash 3.2 with set -u treats expansion of an empty array as unbound.
+          # Construct cyan inputs with an explicit non-empty core instead.
           if (( ${#built_debs[@]} != 1 )); then
             echo "ERROR: expected exactly one YTKACE DEB; got ${#built_debs[@]}" >&2
             exit 1
@@ -389,8 +391,12 @@ jobs:
             # Do not run cyan on the already patched/signed YTKACE IPA.
             # Feed the YTKACE DEB and selected optional DEBs in ONE pass.
             candidate="${output%.ipa}.cyan.ipa"
+            cyan_inputs=("${built_debs[0]}" "${optional_debs[@]}")
+            if (( ${#runtime_files[@]} > 0 )); then
+              cyan_inputs+=("${runtime_files[@]}")
+            fi
             if command -v cyan >/dev/null 2>&1 \
-               && cyan -i YouTube.ipa -o "$candidate" -uwef "${built_debs[0]}" "${optional_debs[@]}" "${runtime_files[@]}" \
+               && cyan -i YouTube.ipa -o "$candidate" -uwef "${cyan_inputs[@]}" \
                && python3 - "$candidate" "${built_debs[0]}" "${optional_debs[@]}" <<'PY_CYAN'
           from pathlib import Path, PurePosixPath
           import os, plistlib, struct, subprocess, sys, tempfile, zipfile
