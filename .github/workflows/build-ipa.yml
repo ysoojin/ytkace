@@ -20,10 +20,6 @@ on:
         description: YouSlider
         type: boolean
         default: true
-      add_ytsilentvote:
-        description: YTSilentVote
-        type: boolean
-        default: true
       add_donteatmycontent:
         description: DontEatMyContent (duplicate symbol fix)
         type: boolean
@@ -64,7 +60,6 @@ jobs:
           ADD_RYD: ${{ inputs.add_ryd }}
           ADD_YTABCONFIG: ${{ inputs.add_ytabconfig }}
           ADD_YOUSLIDER: ${{ inputs.add_youslider }}
-          ADD_YTSILENTVOTE: ${{ inputs.add_ytsilentvote }}
           ADD_DONTEATMYCONTENT: ${{ inputs.add_donteatmycontent }}
         run: |
           set -euo pipefail
@@ -110,7 +105,6 @@ jobs:
           build_tweak ryd PoomSmart/Return-YouTube-Dislikes "$ADD_RYD"
           build_tweak ytabconfig PoomSmart/YTABConfig "$ADD_YTABCONFIG"
           build_tweak youslider PoomSmart/YouSlider "$ADD_YOUSLIDER"
-          build_tweak ytsilentvote PoomSmart/YTSilentVote "$ADD_YTSILENTVOTE"
           build_tweak donteatmycontent therealFoxster/DontEatMyContent "$ADD_DONTEATMYCONTENT"
           printf 'Selected tweak packages.\n' > extra-built/README.txt
           find extra-built -maxdepth 1 -name '*.deb' -print | sort
@@ -155,6 +149,8 @@ jobs:
           PYVALIDATE
       - name: Inject YTKACE and selected tweaks
         id: inject
+        env:
+          ADD_RYD: ${{ inputs.add_ryd }}
         run: |
           set -euo pipefail
           mkdir -p deb-root
@@ -179,7 +175,7 @@ jobs:
             mkdir -p "extra-root/$key"
             dpkg-deb -x "$deb" "extra-root/$key"
           done
-          # Exclude YTUHD, YouQuality, YouMute, YouGetCaption and helper YTVideoOverlay.
+          # Permanently exclude YTSilentVote as well as previously blocked tweaks.
           # No blanket substrate filter is used.
           # Each selected package must provide exactly one unique dylib.
           python3 - <<'PYSELECT'
@@ -187,22 +183,33 @@ jobs:
           import sys
           root = Path('extra-root')
           libs = sorted(p for p in root.rglob('*.dylib') if p.is_file())
-          excluded = {'ytuhd', 'youquality', 'youmute', 'yougetcaption', 'ytvideooverlay'}
+          excluded = {'ytuhd', 'youquality', 'youmute', 'yougetcaption', 'ytvideooverlay', 'ytsilentvote'}
           names = set()
           selected = []
+          ryd_selected = []
           for lib in libs:
               key = lib.relative_to(root).parts[0].lower()
-              if key in excluded or lib.name.lower() == 'ytvideooverlay.dylib':
+              if key in excluded or lib.name.lower() in {'ytvideooverlay.dylib', 'ytsilentvote.dylib'}:
                   print('SKIP blocked tweak:', lib)
                   continue
               if lib.name in names:
                   sys.exit('Duplicate dylib name: ' + lib.name)
               names.add(lib.name)
               selected.append(lib)
+              if key == 'ryd':
+                  ryd_selected.append(lib.name)
               print('INCLUDED:', lib.name)
+          if Path('extra-root/ryd').exists() and not ryd_selected:
+              sys.exit('RYD package exists but no RYD dylib was selected')
+          Path('ryd-dylibs.txt').write_text(''.join(name + '\n' for name in ryd_selected))
+          print('RYD selected libraries:', ryd_selected)
           Path('selected-dylibs.txt').write_text(''.join(str(p) + '\n' for p in selected))
           print(f'Selected {len(selected)} additional dylibs')
           PYSELECT
+          if [[ "$ADD_RYD" == true && ! -s ryd-dylibs.txt ]]; then
+            echo 'ERROR: RYD was enabled but no RYD dylib was selected' >&2
+            exit 1
+          fi
           dylibs=()
           while IFS= read -r lib; do
             if [[ -n "$lib" ]]; then
@@ -224,7 +231,14 @@ jobs:
                           pathlib.Path('selected-dylibs.txt').read_text().splitlines() if line.strip()]
               for name in expected:
                   assert any(p.endswith('/Frameworks/' + name) for p in files), f'Missing library: {name}'
-          print('All requested dylibs are present')
+              ryd_names = pathlib.Path('ryd-dylibs.txt').read_text().splitlines()
+              for name in ryd_names:
+                  assert any(p.endswith('/Frameworks/' + name) for p in files), f'Missing RYD library: {name}'
+              forbidden = {'ytsilentvote.dylib', 'ytuhd.dylib', 'ytvideooverlay.dylib'}
+              unwanted = [p for p in files if p.startswith('Payload/') and '/Frameworks/' in p and pathlib.PurePosixPath(p).name.lower() in forbidden]
+              assert not unwanted, f'Forbidden dylibs are still inside IPA: {unwanted}'
+              print('RYD libraries inside IPA:', ryd_names)
+          print('All requested dylibs are present; blocked dylibs are absent')
           PYVERIFY
           echo "ipa=$output" >> "$GITHUB_OUTPUT"
       - name: Report included tweaks
@@ -234,6 +248,14 @@ jobs:
           if [[ -f selected-dylibs.txt ]]; then
             echo '### Injected extra dylibs' >> "$GITHUB_STEP_SUMMARY"
             cat selected-dylibs.txt >> "$GITHUB_STEP_SUMMARY"
+            echo '' >> "$GITHUB_STEP_SUMMARY"
+            echo 'YTSilentVote: permanently excluded' >> "$GITHUB_STEP_SUMMARY"
+            if [[ -s ryd-dylibs.txt ]]; then
+              echo 'RYD: included and verified' >> "$GITHUB_STEP_SUMMARY"
+              cat ryd-dylibs.txt >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo 'RYD: not selected' >> "$GITHUB_STEP_SUMMARY"
+            fi
           fi
       - uses: actions/upload-artifact@v7
         with:
