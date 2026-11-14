@@ -161,18 +161,88 @@ jobs:
             else
               make FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless DISABLE_ROOTLESS_COMPAT_WARNING=1
             fi
-            mkdir -p "../../extra-built/$key"
-            libs=()
-            while IFS= read -r lib; do
-              libs+=("$lib")
-            done < <(find .theos/obj -type f -name '*.dylib' -print | sort)
-            if (( ${#libs[@]} == 0 )); then
-              echo "No dylib built for $key" >&2
-              exit 1
-            fi
-            for lib in "${libs[@]}"; do
-              cp "$lib" "../../extra-built/$key/$(basename "$lib")"
-            done
+            # Copy only real MH_DYLIB binaries. Theos may generate .dylib
+            # files with MH_DSYM (type 10); those cannot be signed or loaded.
+            # Never select by filename or find ordering alone.
+            python3 - "$key" "../../extra-built/$key" <<'PYLIB'
+          from pathlib import Path
+          import shutil
+          import struct
+          import sys
+
+          key, target = sys.argv[1:]
+          destination = Path(target)
+          root = Path('.theos/obj')
+          if not root.is_dir():
+              sys.exit(f'ERROR [{key}]: .theos/obj not found')
+
+          thin = {
+              b'\xfe\xed\xfa\xce': '>', b'\xce\xfa\xed\xfe': '<',
+              b'\xfe\xed\xfa\xcf': '>', b'\xcf\xfa\xed\xfe': '<',
+          }
+          fat = {
+              b'\xca\xfe\xba\xbe': ('>', 20),
+              b'\xbe\xba\xfe\xca': ('<', 20),
+              b'\xca\xfe\xba\xbf': ('>', 24),
+              b'\xbf\xba\xfe\xca': ('<', 24),
+          }
+
+          def types(file, offset=0, depth=0):
+              if depth > 2:
+                  raise ValueError('nested fat Mach-O header')
+              file.seek(offset)
+              magic = file.read(4)
+              if magic in thin:
+                  file.seek(offset + 12)
+                  data = file.read(4)
+                  if len(data) != 4:
+                      raise ValueError('truncated Mach-O header')
+                  return [struct.unpack(thin[magic] + 'I', data)[0]]
+              if magic in fat:
+                  byteorder, size = fat[magic]
+                  raw_count = file.read(4)
+                  if len(raw_count) != 4:
+                      raise ValueError('truncated fat header')
+                  count = struct.unpack(byteorder + 'I', raw_count)[0]
+                  if not 1 <= count <= 64:
+                      raise ValueError('invalid fat slice count')
+                  result = []
+                  for idx in range(count):
+                      file.seek(offset + 8 + idx * size)
+                      entry = file.read(size)
+                      if len(entry) != size:
+                          raise ValueError('truncated fat architecture table')
+                      position = struct.unpack_from(
+                          byteorder + ('Q' if size == 24 else 'I'), entry, 8
+                      )[0]
+                      result.extend(types(file, offset + position, depth + 1))
+                  return result
+              return []
+
+          candidates = sorted(root.rglob('*.dylib'))
+          picked = {}
+          for lib in candidates:
+              if any(part.lower().endswith('.dsym') for part in lib.parts):
+                  print(f'SKIP dSYM bundle: {lib}')
+                  continue
+              with lib.open('rb') as stream:
+                  file_types = types(stream)
+              if not file_types or not all(t == 6 for t in file_types):
+                  print(f'SKIP non-MH_DYLIB: {lib} (types: {file_types})')
+                  continue
+              if lib.name in picked:
+                  print(f'SKIP duplicate real dylib: {lib} (using {picked[lib.name]})')
+                  continue
+              picked[lib.name] = lib
+
+          if not picked:
+              sys.exit(f'ERROR [{key}]: no valid MH_DYLIB found; refusing to package dSYM')
+
+          destination.mkdir(parents=True, exist_ok=True)
+          for name, lib in sorted(picked.items()):
+              shutil.copy2(lib, destination / name)
+              print(f'INCLUDE real dylib [{key}]: {lib} -> {destination / name}')
+          PYLIB
             popd
           }
 
