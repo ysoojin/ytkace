@@ -32,10 +32,6 @@ on:
         description: DontEatMyContent (duplicate symbol fix)
         type: boolean
         default: true
-      add_yougetcaption:
-        description: YouGetCaption
-        type: boolean
-        default: true
 
 permissions:
   contents: read
@@ -97,7 +93,6 @@ jobs:
           ADD_YOUSLIDER: ${{ inputs.add_youslider }}
           ADD_YTSILENTVOTE: ${{ inputs.add_ytsilentvote }}
           ADD_DONTEATMYCONTENT: ${{ inputs.add_donteatmycontent }}
-          ADD_YOUGETCAPTION: ${{ inputs.add_yougetcaption }}
         run: |
           set -euo pipefail
           mkdir -p extra-built sources
@@ -156,7 +151,6 @@ jobs:
           build_tweak youslider PoomSmart/YouSlider "$ADD_YOUSLIDER"
           build_tweak ytsilentvote PoomSmart/YTSilentVote "$ADD_YTSILENTVOTE"
           build_tweak donteatmycontent therealFoxster/DontEatMyContent "$ADD_DONTEATMYCONTENT"
-          build_tweak yougetcaption PoomSmart/YouGetCaption "$ADD_YOUGETCAPTION"
           printf 'Selected tweak packages.\n' > extra-built/README.txt
           find extra-built -maxdepth 1 -name '*.deb' -print | sort
 
@@ -224,15 +218,15 @@ jobs:
             mkdir -p "extra-root/$key"
             dpkg-deb -x "$deb" "extra-root/$key"
           done
-          # Preserve all selected extras except the removed YouQuality, YouMute,
-          # and their helper YTVideoOverlay. No blanket substrate filter is used.
+          # Exclude YouQuality, YouMute, YouGetCaption and their helper YTVideoOverlay.
+          # No blanket substrate filter is used.
           # Each selected package must provide exactly one unique dylib.
           python3 - <<'PYSELECT'
           from pathlib import Path
           import sys
           root = Path('extra-root')
           libs = sorted(p for p in root.rglob('*.dylib') if p.is_file())
-          excluded = {'youquality', 'youmute', 'ytvideooverlay'}
+          excluded = {'youquality', 'youmute', 'yougetcaption', 'ytvideooverlay'}
           names = set()
           selected = []
           for lib in libs:
