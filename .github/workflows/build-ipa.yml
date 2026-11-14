@@ -282,6 +282,58 @@ jobs:
           echo 'Skipped optional tweaks:'
           cat selected-failed.txt
 
+      - name: Resolve YouSlider color picker dependencies before IPA integration
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p optional-runtime
+          test -f extra-debs/youslider.deb || exit 0
+          mkdir -p slider-check
+          dpkg-deb -x extra-debs/youslider.deb slider-check
+          slider_lib="$(find slider-check -type f -name 'YouSlider.dylib' -print -quit)"
+          if [[ -z "$slider_lib" ]]; then
+            echo 'FAILED youslider: DEB has no YouSlider.dylib' >> selected-failed.txt
+            rm -f extra-debs/youslider.deb
+            sed -i '' '/^OK youslider$/d' selected-success.txt
+            exit 0
+          fi
+          if ! otool -L "$slider_lib" | grep -Fq '@rpath/libcolorpicker.dylib'; then
+            echo 'YouSlider does not reference @rpath/libcolorpicker.dylib; no additional runtime needed.'
+            exit 0
+          fi
+          # For a sideload IPA, a jailbreak package dependency does NOT install
+          # a library into the IPA. Only use explicitly supplied real binaries.
+          picker=prebuilt-deps/libcolorpicker.dylib
+          framework=prebuilt-deps/Alderis.framework
+          if [[ ! -s "$picker" ]]; then
+            echo '::warning::YouSlider needs libcolorpicker.dylib, but prebuilt-deps/libcolorpicker.dylib is missing. Skipping YouSlider to prevent a DYLD launch crash.'
+            echo 'FAILED youslider: missing prebuilt-deps/libcolorpicker.dylib (runtime dependency)' >> selected-failed.txt
+            rm -f extra-debs/youslider.deb
+            sed -i '' '/^OK youslider$/d' selected-success.txt
+            exit 0
+          fi
+          if ! otool -hv "$picker" | grep -q 'DYLIB'; then
+            echo '::warning::Invalid libcolorpicker.dylib (not a Mach-O dynamic library); skipping YouSlider.'
+            echo 'FAILED youslider: invalid libcolorpicker.dylib' >> selected-failed.txt
+            rm -f extra-debs/youslider.deb
+            sed -i '' '/^OK youslider$/d' selected-success.txt
+            exit 0
+          fi
+          # Alderis libcolorpicker compatibility shims may require the full
+          # Alderis.framework. Passing only the shim creates a second DYLD crash.
+          if otool -L "$picker" | grep -Fq 'Alderis.framework/Alderis'; then
+            if [[ ! -s "$framework/Alderis" ]]; then
+              echo '::warning::libcolorpicker requires Alderis.framework. Both must be supplied; skipping YouSlider.'
+              echo 'FAILED youslider: Alderis.framework missing for libcolorpicker' >> selected-failed.txt
+              rm -f extra-debs/youslider.deb
+              sed -i '' '/^OK youslider$/d' selected-success.txt
+              exit 0
+            fi
+            cp -R "$framework" optional-runtime/Alderis.framework
+          fi
+          cp "$picker" optional-runtime/libcolorpicker.dylib
+          echo 'Ready: YouSlider and its supplied color picker runtime will be injected in the same cyan pass.'
+
       - name: Download decrypted IPA
         env:
           IPA_URL: ${{ inputs.ipa_url }}
@@ -327,6 +379,7 @@ jobs:
           shopt -s nullglob
           optional_debs=(extra-debs/*.deb)
           built_debs=(built-deb/*.deb)
+          runtime_files=(optional-runtime/*)
           if (( ${#built_debs[@]} != 1 )); then
             echo "ERROR: expected exactly one YTKACE DEB; got ${#built_debs[@]}" >&2
             exit 1
@@ -337,7 +390,7 @@ jobs:
             # Feed the YTKACE DEB and selected optional DEBs in ONE pass.
             candidate="${output%.ipa}.cyan.ipa"
             if command -v cyan >/dev/null 2>&1 \
-               && cyan -i YouTube.ipa -o "$candidate" -uwef "${built_debs[0]}" "${optional_debs[@]}" \
+               && cyan -i YouTube.ipa -o "$candidate" -uwef "${built_debs[0]}" "${optional_debs[@]}" "${runtime_files[@]}" \
                && python3 - "$candidate" "${built_debs[0]}" "${optional_debs[@]}" <<'PY_CYAN'
           from pathlib import Path, PurePosixPath
           import os, plistlib, struct, subprocess, sys, tempfile, zipfile
@@ -360,6 +413,10 @@ jobs:
                   by_name = {PurePosixPath(n).name: n for n in files if n.endswith('.dylib') and '.dSYM/' not in n}
                   missing = expected - set(by_name)
                   assert not missing, f'Cyan lost requested tweak libraries: {sorted(missing)}'
+                  if Path('optional-runtime/libcolorpicker.dylib').is_file():
+                      assert 'libcolorpicker.dylib' in by_name, 'Missing libcolorpicker in output IPA'
+                  if Path('optional-runtime/Alderis.framework/Alderis').is_file():
+                      assert any(n.endswith('/Alderis.framework/Alderis') for n in files), 'Missing Alderis.framework in output IPA'
                   for name in sorted(expected):
                       payload = z.read(by_name[name])
                       assert len(payload) > 32, f'Empty dylib: {name}'
@@ -383,6 +440,28 @@ jobs:
                           if not any('CydiaSubstrate.framework/CydiaSubstrate' in f for f in files):
                               unresolved.append(name)
                   assert not unresolved, f'Unresolved CydiaSubstrate library: {unresolved}'
+                  # Validate all @rpath library references of packaged tweaks.
+                  # This catches the precise YouSlider -> libcolorpicker failure
+                  # that basic 'dylib is present' verification missed.
+                  binaries = [p for p in (Path(temp)/'Payload').rglob('*') if p.is_file() and (
+                      p.suffix == '.dylib' or p.parent.suffix == '.framework' and p.name == p.parent.stem)]
+                  present = set(files)
+                  missing_runtime = []
+                  for binary in binaries:
+                      result = subprocess.run(['otool', '-L', str(binary)], capture_output=True, text=True)
+                      if result.returncode:
+                          continue
+                      for line in result.stdout.splitlines()[1:]:
+                          dep = line.strip().split(' (', 1)[0]
+                          if not dep.startswith('@rpath/'):
+                              continue
+                          suffix = dep[len('@rpath/'):]
+                          # A framework/lib must exist within the app bundle;
+                          # on-device jailbroken libraries are not portable.
+                          if not any(path.endswith('/Frameworks/' + suffix) or
+                                     path.endswith('/' + suffix) for path in present):
+                              missing_runtime.append((binary.name, dep))
+                  assert not missing_runtime, 'Unresolved packaged @rpath dependencies: ' + repr(missing_runtime)
           print('Verified integrated Mach-O libraries:', ', '.join(sorted(expected)))
           PY_CYAN
             then
@@ -436,7 +515,7 @@ jobs:
           with open(sys.argv[2], 'a') as f:
               f.write('\n'.join('- ' + name for name in libs) + '\n' if libs else 'No .dylib filenames found\n')
           PY_SUMMARY
-          echo '### Skipped or failed optional builds' >> "$GITHUB_STEP_SUMMARY"
+          echo '### Skipped or failed optional builds / runtime dependencies' >> "$GITHUB_STEP_SUMMARY"
           if [[ -s selected-failed.txt ]]; then cat selected-failed.txt >> "$GITHUB_STEP_SUMMARY"; else echo 'None' >> "$GITHUB_STEP_SUMMARY"; fi
           echo '### Requested tweak options' >> "$GITHUB_STEP_SUMMARY"
           if [[ -s requested-tweaks.txt ]]; then cat requested-tweaks.txt >> "$GITHUB_STEP_SUMMARY"; else echo 'None' >> "$GITHUB_STEP_SUMMARY"; fi
