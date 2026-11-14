@@ -20,16 +20,8 @@ on:
         description: YTABConfig (default OFF)
         type: boolean
         default: false
-      add_youquality:
-        description: YouQuality (requires YTVideoOverlay; default OFF)
-        type: boolean
-        default: false
       add_youslider:
         description: YouSlider (default OFF)
-        type: boolean
-        default: false
-      add_youmute:
-        description: YouMute (requires YTVideoOverlay; default OFF)
         type: boolean
         default: false
       add_ytsilentvote:
@@ -38,6 +30,14 @@ on:
         default: false
       add_donteatmycontent:
         description: DontEatMyContent (untested; default OFF)
+        type: boolean
+        default: false
+      add_youquality:
+        description: YouQuality (requires YTVideoOverlay; default OFF)
+        type: boolean
+        default: false
+      add_youmute:
+        description: YouMute (requires YTVideoOverlay; default OFF)
         type: boolean
         default: false
       add_yougetcaption:
