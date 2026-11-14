@@ -1,4 +1,4 @@
-name: IPA (YTKACE + optional sideload tweak files)
+name: IPA (YTKACE + optional Sideloadly tweak artifacts)
 
 on:
   workflow_dispatch:
@@ -9,9 +9,9 @@ on:
         type: string
         default: 'https://www.dropbox.com/scl/fi/odyv50o9pgx7fh8nr8u5h/com.google.ios.youtube-21.45.4-Decrypted.ipa?rlkey=q8sq80ak1t8qr0pwe1t8f448e&st=tqx7k2kt&dl=1'
       add_ryd:
-        description: Build RYD for Sideloadly injection (default ON; separately injected)
+        description: RYD for Sideloadly artifact (default OFF)
         type: boolean
-        default: true
+        default: false
       add_ytuhd:
         description: YTUHD (jailbreak-only dependency observed; default OFF)
         type: boolean
@@ -61,22 +61,56 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: bash -c "$(curl -fsSL https://raw.githubusercontent.com/roothide/theos/master/bin/install-theos)"
-      - name: Build YTKACE dylib only (no DEB)
+      - name: Build YTKACE Rootless DEB and extract shipped library
+        shell: bash
         run: |
           set -euo pipefail
-          make clean || true
-          make FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless DISABLE_ROOTLESS_COMPAT_WARNING=1
-          mkdir -p built-ytkace
-          lib="$(find .theos/obj -type f -name 'YTKACE.dylib' -print -quit)"
-          test -n "$lib" || { echo 'YTKACE.dylib missing after make' >&2; exit 1; }
-          cp "$lib" built-ytkace/YTKACE.dylib
+          make clean
+          make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless DISABLE_ROOTLESS_COMPAT_WARNING=1
+          mkdir -p built-ytkace built-deb extracted
+          shopt -s nullglob
+          packages=(packages/*.deb)
+          if (( ${#packages[@]} != 1 )); then
+            echo "Expected exactly one Rootless DEB, found ${#packages[@]}" >&2
+            exit 1
+          fi
+          version="$(awk '/^Version:/ {print $2}' control)"
+          test -n "$version"
+          deb="built-deb/com.itzzace.ytkace_${version}_rootless.deb"
+          cp "${packages[0]}" "$deb"
+          dpkg-deb --extract "$deb" extracted
+          python3 - <<'PY_YTKACE'
+          from pathlib import Path
+          import shutil, struct, sys
+          libs=[p for p in Path('extracted').rglob('YTKACE.dylib') if p.is_file()]
+          if len(libs)!=1:
+              sys.exit(f'Expected exactly one YTKACE.dylib in DEB, found: {libs}')
+          p=libs[0]
+          with p.open('rb') as f:
+              magic=f.read(4)
+              endian={b'\xfe\xed\xfa\xce':'>',b'\xce\xfa\xed\xfe':'<',b'\xfe\xed\xfa\xcf':'>',b'\xcf\xfa\xed\xfe':'<'}
+              if magic not in endian:
+                  sys.exit(f'YTKACE is not thin Mach-O: {p}; magic={magic.hex()}')
+              f.seek(12)
+              kind=struct.unpack(endian[magic]+'I',f.read(4))[0]
+              if kind!=6:
+                  sys.exit(f'YTKACE library has Mach-O type {kind}, expected MH_DYLIB (6): {p}')
+          shutil.copy2(p,'built-ytkace/YTKACE.dylib')
+          print('Using packaged real YTKACE library:',p)
+          PY_YTKACE
       - uses: actions/upload-artifact@v7
         with:
           name: YTKACE-library
           path: built-ytkace/YTKACE.dylib
           if-no-files-found: error
+      - uses: actions/upload-artifact@v7
+        with:
+          name: YTKACE-deb-rootless
+          path: built-deb/*.deb
+          if-no-files-found: error
 
   extra-tweaks:
+    if: ${{ inputs.add_ryd || inputs.add_ytuhd || inputs.add_ytabconfig || inputs.add_youquality || inputs.add_youslider || inputs.add_youmute || inputs.add_ytsilentvote || inputs.add_donteatmycontent || inputs.add_yougetcaption }}
     runs-on: ${{ inputs.add_ytuhd && 'macos-15' || 'ubuntu-24.04' }}
     env:
       THEOS: ${{ github.workspace }}/.theos
@@ -263,14 +297,41 @@ jobs:
           printf 'Selected tweak dylibs (not DEB packages).\n' > extra-built/README.txt
           find extra-built -type f -name '*.dylib' -print | sort
 
+      - name: Prepare Sideloadly tweak files
+        run: |
+          set -euo pipefail
+          mkdir -p sideloadly-tweaks
+          python3 - <<'PY_ARTIFACT'
+          from pathlib import Path
+          import shutil, sys
+          source=Path('extra-built')
+          target=Path('sideloadly-tweaks')
+          libraries=sorted(source.rglob('*.dylib'))
+          names=set()
+          lines=['Sideloadly optional tweak libraries',
+                 'Extract this artifact ZIP and select desired .dylib files in Sideloadly.',
+                 'Enable the appropriate Cydia Substrate injection option for tweaks that require it.',
+                 'Libraries are not inside the YouTube-IPA artifact.',
+                 'Do not inject jailbreak-only tweaks on stock iOS without compatible runtime.', '']
+          for f in libraries:
+              if f.name in names:
+                  sys.exit(f'ERROR: duplicate library name in selected tweaks: {f.name}')
+              names.add(f.name)
+              shutil.copy2(f,target/f.name)
+              lines.append(f'{f.parent.name}: {f.name}')
+              print('SIDELOADLY ARTIFACT:',f)
+          if not libraries:lines.append('No optional tweaks selected (all OFF).')
+          (target/'README.txt').write_text('\n'.join(lines)+'\n')
+          PY_ARTIFACT
+
       - uses: actions/upload-artifact@v7
         with:
-          name: YTKACE-selected-extra-libraries
-          path: extra-built/
+          name: Sideloadly-Selected-Tweaks
+          path: sideloadly-tweaks/
           if-no-files-found: error
 
   package:
-    needs: [ytkace, extra-tweaks]
+    needs: [ytkace]
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v6
@@ -278,10 +339,6 @@ jobs:
         with:
           name: YTKACE-library
           path: built-ytkace
-      - uses: actions/download-artifact@v8
-        with:
-          name: YTKACE-selected-extra-libraries
-          path: extra-root
       - name: Install packaging tools
         run: brew install ldid
       - name: Download decrypted IPA
@@ -301,132 +358,43 @@ jobs:
           with zipfile.ZipFile('YouTube.ipa') as z:
               assert any(n.startswith('Payload/') and n.endswith('.app/Info.plist') for n in z.namelist())
           PYVALIDATE
-      - name: Inject YTKACE and selected tweaks
+      - name: Inject YTKACE only (optional tweaks remain separate)
         id: inject
-        env:
-          ADD_RYD: ${{ inputs.add_ryd }}
         run: |
           set -euo pipefail
-          ytkace="$(find built-ytkace -name YTKACE.dylib -print -quit)"
-          test -n "$ytkace"
+          ytkace="$(find built-ytkace -name YTKACE.dylib -type f -print -quit)"
+          test -n "$ytkace" || { echo 'Missing YTKACE library' >&2; exit 1; }
           export LDID="$(brew --prefix)/bin/ldid"
           version="$(awk '/^Version:/ {print $2}' control)"
-          youtube_version="$(python3 - <<'PYVERSION'
-          import plistlib, zipfile
+          youtube_version="$(python3 - <<'PY_VERSION'
+          import plistlib,zipfile
           with zipfile.ZipFile('YouTube.ipa') as z:
-              info = next(n for n in z.namelist() if n.startswith('Payload/') and n.endswith('.app/Info.plist'))
+              info=next(n for n in z.namelist() if n.startswith('Payload/') and n.endswith('.app/Info.plist'))
               print(plistlib.loads(z.read(info))['CFBundleShortVersionString'])
-          PYVERSION
+          PY_VERSION
           )"
           output="YouTube_${youtube_version}_YTKACE_${version}.ipa"
-          # Extra dylibs were built directly from source; no DEB is generated.
-          test -d extra-root
-          # Include precisely the explicitly selected tweak libraries.
-          # Defaults: RYD ON, all other tweaks OFF.
-          # No blanket dependency filtering; these are user-selected builds.
-          python3 - <<'PYSELECT'
-          from pathlib import Path
-          import sys
-          root = Path('extra-root')
-          libs = sorted(p for p in root.rglob('*.dylib') if p.is_file())
-          names = set()
-          selected = []
-          ryd_selected = []
-          for lib in libs:
-              key = lib.relative_to(root).parts[0].lower()
-              if lib.name in names:
-                  sys.exit('Duplicate dylib name: ' + lib.name)
-              names.add(lib.name)
-              if key == 'ryd':
-                  ryd_selected.append(lib.name)
-                  print('RYD FOR SIDELOADLY (not in IPA):', lib)
-              else:
-                  selected.append(lib)
-                  print('INCLUDED IN IPA:', lib.name)
-          Path('ryd-dylibs.txt').write_text(''.join(name + '\n' for name in ryd_selected))
-          print('RYD selected libraries:', ryd_selected)
-          Path('selected-dylibs.txt').write_text(''.join(str(p) + '\n' for p in selected))
-          print(f'Selected {len(selected)} additional IPA dylibs, {len(ryd_selected)} separately supplied RYD dylibs')
-          PYSELECT
-          if [[ "$ADD_RYD" == true && ! -s ryd-dylibs.txt ]]; then
-            echo 'ERROR: RYD enabled but its library is missing' >&2
-            exit 1
-          fi
-          if [[ "$ADD_RYD" != true && -s ryd-dylibs.txt ]]; then
-            echo 'ERROR: RYD disabled but its library is present' >&2
-            exit 1
-          fi
-          if [[ "$ADD_RYD" == true ]]; then
-            mkdir -p ryd-for-sideloadly
-            while IFS= read -r name; do
-              file="$(find extra-root/ryd -name "$name" -type f -print -quit)"
-              test -n "$file" || { echo "Missing RYD: $name" >&2; exit 1; }
-              cp "$file" "ryd-for-sideloadly/$name"
-            done < ryd-dylibs.txt
-          fi
-          dylibs=()
-          while IFS= read -r lib; do
-            if [[ -n "$lib" ]]; then
-              dylibs+=("$lib")
-            fi
-          done < selected-dylibs.txt
-          if [[ -s selected-dylibs.txt ]]; then
-            bash Scripts/sideload-repack.sh YouTube.ipa "$ytkace" "$output" "${dylibs[@]}"
-          else
-            bash Scripts/sideload-repack.sh YouTube.ipa "$ytkace" "$output"
-          fi
+          bash Scripts/sideload-repack.sh YouTube.ipa "$ytkace" "$output"
           bash Tools/verify-artifacts.sh "$ytkace" "$output"
-          # Verify the final archive even when no optional tweak is eligible.
-          python3 - "$output" "$ytkace" <<'PYVERIFY'
-          import pathlib, sys, zipfile
-          with zipfile.ZipFile(sys.argv[1]) as z:
-              files = set(z.namelist())
-              expected = [pathlib.Path(line.strip()).name for line in
-                          pathlib.Path('selected-dylibs.txt').read_text().splitlines() if line.strip()]
-              for name in expected:
-                  assert any(p.endswith('/Frameworks/' + name) for p in files), f'Missing library: {name}'
-              ryd_names = pathlib.Path('ryd-dylibs.txt').read_text().splitlines()
-              for name in ryd_names:
-                  assert not any(p.endswith('/Frameworks/' + name) for p in files), f'RYD must be injected with Sideloadly, not directly: {name}'
-              print('RYD files reserved for Sideloadly:', ryd_names)
-          print('All selected tweak dylibs are present')
-          PYVERIFY
+          python3 - "$output" <<'PY_VERIFY'
+          import sys,zipfile
+          with zipfile.ZipFile(sys.argv[1]) as archive:
+              libs=[x for x in archive.namelist() if '/Frameworks/' in x and x.endswith('.dylib')]
+              if not any(x.endswith('/Frameworks/YTKACE.dylib') for x in libs):
+                  sys.exit('YTKACE missing from IPA')
+              unexpected=[x for x in libs if x.rsplit('/',1)[-1] in {
+                  'YouTubeDislikesReturn.dylib','YTVideoOverlay.dylib',
+                  'YTUHD.dylib','YTABConfig.dylib','YouSlider.dylib',
+                  'YTSilentVote.dylib','YouMute.dylib','YouQuality.dylib',
+                  'DontEatMyContent.dylib','YouGetCaption.dylib'}]
+              if unexpected:sys.exit('Unexpected optional tweak embedded in IPA: '+str(unexpected))
+          print('IPA verified: YTKACE only; optional tweaks are separate')
+          PY_VERIFY
           echo "ipa=$output" >> "$GITHUB_OUTPUT"
-      - name: Report included tweaks
-        if: always()
-        shell: bash
-        run: |
-          if [[ -f selected-dylibs.txt ]]; then
-            echo '### Injected extra dylibs' >> "$GITHUB_STEP_SUMMARY"
-            cat selected-dylibs.txt >> "$GITHUB_STEP_SUMMARY"
-            echo '' >> "$GITHUB_STEP_SUMMARY"
-            if [[ -s ryd-dylibs.txt ]]; then
-              echo 'RYD: separate dylib; inject with Sideloadly and enable Cydia Substrate' >> "$GITHUB_STEP_SUMMARY"
-              cat ryd-dylibs.txt >> "$GITHUB_STEP_SUMMARY"
-            else
-              echo 'RYD: not selected' >> "$GITHUB_STEP_SUMMARY"
-            fi
-          fi
+
       - uses: actions/upload-artifact@v7
         with:
           name: YouTube-IPA
           path: ${{ steps.inject.outputs.ipa }}
           if-no-files-found: error
 
-      - name: Upload RYD for Sideloadly
-        if: ${{ inputs.add_ryd }}
-        uses: actions/upload-artifact@v7
-        with:
-          name: RYD-for-Sideloadly
-          path: ryd-for-sideloadly/*.dylib
-          if-no-files-found: error
-
-      - name: Trigger Release publication
-        if: ${{ success() && github.ref == 'refs/heads/main' }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh workflow run publish-release.yml \
-            --repo "$GITHUB_REPOSITORY" \
-            --ref main \
-            -f run_id="$GITHUB_RUN_ID"

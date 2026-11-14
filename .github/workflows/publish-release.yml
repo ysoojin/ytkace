@@ -1,6 +1,9 @@
 name: Publish YouTube Release
 
 on:
+  workflow_run:
+    workflows: ['IPA (YTKACE + optional Sideloadly tweak artifacts)']
+    types: [completed]
   workflow_dispatch:
     inputs:
       run_id:
@@ -13,16 +16,17 @@ permissions:
   contents: write
 
 concurrency:
-  group: publish-youtube-${{ inputs.run_id }}
+  group: publish-youtube-${{ github.event.workflow_run.id || inputs.run_id }}
   cancel-in-progress: false
 
 jobs:
   publish:
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.event == 'workflow_dispatch') }}
     runs-on: ubuntu-24.04
     env:
       GH_TOKEN: ${{ github.token }}
       REPO: ${{ github.repository }}
-      RUN_ID: ${{ inputs.run_id }}
+      RUN_ID: ${{ github.event.workflow_run.id || inputs.run_id }}
     steps:
       - name: Check source workflow run
         id: source
@@ -44,26 +48,27 @@ jobs:
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
           echo "tag=youtube-build-${RUN_ID}" >> "$GITHUB_OUTPUT"
 
-      - name: Download final IPA only
+      - name: Download YTKACE IPA and Rootless DEB
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p artifacts ipa
-          gh run download "$RUN_ID" --repo "$REPO" --name YouTube-IPA --dir artifacts
-          find artifacts -type f -name '*.ipa' -exec cp {} ipa/ \;
+          mkdir -p artifacts/ipa artifacts/deb
+          gh run download "$RUN_ID" --repo "$REPO" --name YouTube-IPA --dir artifacts/ipa
+          gh run download "$RUN_ID" --repo "$REPO" --name YTKACE-deb-rootless --dir artifacts/deb
           shopt -s nullglob
-          ipas=(ipa/*.ipa)
-          if (( ${#ipas[@]} != 1 )); then
-            printf 'Expected exactly 1 IPA, found %s\n' "${#ipas[@]}" >&2
+          ipas=(artifacts/ipa/*.ipa)
+          debs=(artifacts/deb/*.deb)
+          if (( ${#ipas[@]} != 1 || ${#debs[@]} != 1 )); then
+            echo "Expected exactly one IPA and one Rootless DEB" >&2
             exit 1
           fi
-          file "${ipas[0]}"
+          file "${ipas[0]}" "${debs[0]}"
           python3 - "${ipas[0]}" <<'PY'
           import sys, zipfile
           with zipfile.ZipFile(sys.argv[1]) as z:
               assert any(p.startswith('Payload/') and p.endswith('.app/Info.plist') for p in z.namelist())
           PY
-          sha256sum "${ipas[0]}" > SHA256SUMS.txt
+          sha256sum "${ipas[0]}" "${debs[0]}" > SHA256SUMS.txt
 
       - name: Create a new GitHub Release
         shell: bash
@@ -79,7 +84,7 @@ jobs:
           gh release create "$TAG" \
             --repo "$REPO" \
             --target "$SOURCE_SHA" \
-            --title "YouTube IPA (run $RUN_ID)" \
-            --notes "Built from successful IPA workflow run $RUN_ID. Contains the YouTube IPA only. Optional jailbreak tweaks may not work on a non-jailbroken device." \
-            ipa/*.ipa SHA256SUMS.txt
+            --title "YouTube IPA + YTKACE DEB (run $RUN_ID)" \
+            --notes "Built from successful IPA workflow run $RUN_ID. IPA contains YTKACE only. Selected additional tweaks, if any, are separate Actions artifacts for Sideloadly; no compatibility guarantee." \
+            artifacts/ipa/*.ipa artifacts/deb/*.deb SHA256SUMS.txt
           echo "Release: https://github.com/$REPO/releases/tag/$TAG"
