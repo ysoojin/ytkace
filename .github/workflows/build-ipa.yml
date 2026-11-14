@@ -20,28 +20,12 @@ on:
         description: YTABConfig (default OFF)
         type: boolean
         default: false
-      add_youslider:
-        description: YouSlider (default OFF)
-        type: boolean
-        default: false
       add_ytsilentvote:
         description: YTSilentVote (default OFF)
         type: boolean
         default: false
       add_donteatmycontent:
         description: DontEatMyContent (untested; default OFF)
-        type: boolean
-        default: false
-      add_youquality:
-        description: YouQuality (requires YTVideoOverlay; default OFF)
-        type: boolean
-        default: false
-      add_youmute:
-        description: YouMute (requires YTVideoOverlay; default OFF)
-        type: boolean
-        default: false
-      add_yougetcaption:
-        description: YouGetCaption (requires YTVideoOverlay; default OFF)
         type: boolean
         default: false
 
@@ -134,7 +118,7 @@ jobs:
       - name: Install IPA signing tool
         run: brew install ldid
       - name: Install optional DEB and cyan tools
-        if: ${{ inputs.add_ryd || inputs.add_ytuhd || inputs.add_ytabconfig || inputs.add_youquality || inputs.add_youslider || inputs.add_youmute || inputs.add_ytsilentvote || inputs.add_donteatmycontent || inputs.add_yougetcaption }}
+        if: ${{ inputs.add_ryd || inputs.add_ytuhd || inputs.add_ytabconfig || inputs.add_ytsilentvote || inputs.add_donteatmycontent }}
         run: |
           set -euo pipefail
           brew install dpkg
@@ -143,7 +127,7 @@ jobs:
           command -v cyan
           cyan --help >/dev/null
       - name: Install Theos for selected tweaks
-        if: ${{ inputs.add_ryd || inputs.add_ytuhd || inputs.add_ytabconfig || inputs.add_youquality || inputs.add_youslider || inputs.add_youmute || inputs.add_ytsilentvote || inputs.add_donteatmycontent || inputs.add_yougetcaption }}
+        if: ${{ inputs.add_ryd || inputs.add_ytuhd || inputs.add_ytabconfig || inputs.add_ytsilentvote || inputs.add_donteatmycontent }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -154,12 +138,8 @@ jobs:
           ADD_RYD: ${{ inputs.add_ryd }}
           ADD_YTUHD: ${{ inputs.add_ytuhd }}
           ADD_YTABCONFIG: ${{ inputs.add_ytabconfig }}
-          ADD_YOUQUALITY: ${{ inputs.add_youquality }}
-          ADD_YOUSLIDER: ${{ inputs.add_youslider }}
-          ADD_YOUMUTE: ${{ inputs.add_youmute }}
           ADD_YTSILENTVOTE: ${{ inputs.add_ytsilentvote }}
           ADD_DONTEATMYCONTENT: ${{ inputs.add_donteatmycontent }}
-          ADD_YOUGETCAPTION: ${{ inputs.add_yougetcaption }}
         shell: bash
         run: |
           set -euo pipefail
@@ -167,7 +147,7 @@ jobs:
           : > selected-success.txt
           : > selected-failed.txt
           : > requested-tweaks.txt
-          for pair in "ryd:$ADD_RYD" "ytuhd:$ADD_YTUHD" "ytabconfig:$ADD_YTABCONFIG" "youquality:$ADD_YOUQUALITY" "youslider:$ADD_YOUSLIDER" "youmute:$ADD_YOUMUTE" "ytsilentvote:$ADD_YTSILENTVOTE" "donteatmycontent:$ADD_DONTEATMYCONTENT" "yougetcaption:$ADD_YOUGETCAPTION"; do
+          for pair in "ryd:$ADD_RYD" "ytuhd:$ADD_YTUHD" "ytabconfig:$ADD_YTABCONFIG" "ytsilentvote:$ADD_YTSILENTVOTE" "donteatmycontent:$ADD_DONTEATMYCONTENT"; do
             if [[ "${pair##*:}" == true ]]; then printf '%s\n' "${pair%%:*}" >> requested-tweaks.txt; fi
           done
           # Optional tweak build failures are reported, not fatal.
@@ -248,91 +228,17 @@ jobs:
             echo '::endgroup::'
           }
 
-          # Overlay source is needed for clients such as YouQuality and YouMute.
-          overlay=false
-          if [[ "$ADD_YOUQUALITY" == true || "$ADD_YOUMUTE" == true || "$ADD_YOUGETCAPTION" == true ]]; then
-            overlay=true
-          fi
-          build_one ytvideooverlay PoomSmart/YTVideoOverlay "$overlay"
-          # The overlay clients must not be packed if their shared dependency fails.
-          if [[ "$overlay" == true ]] && ! grep -qx 'OK ytvideooverlay' selected-success.txt; then
-            for key in youquality youmute yougetcaption; do
-              var="ADD_${key^^}"
-              if [[ "${!var:-false}" == true ]]; then
-                echo "FAILED $key: YTVideoOverlay dependency unavailable" >> selected-failed.txt
-              fi
-            done
-            ADD_YOUQUALITY=false
-            ADD_YOUMUTE=false
-            ADD_YOUGETCAPTION=false
-          fi
           if [[ "$ADD_RYD" == true ]]; then
             build_one ryd PoomSmart/Return-YouTube-Dislikes true
           fi
           build_one ytuhd PoomSmart/YTUHD "$ADD_YTUHD"
           build_one ytabconfig PoomSmart/YTABConfig "$ADD_YTABCONFIG"
-          build_one youquality PoomSmart/YouQuality "$ADD_YOUQUALITY"
-          build_one youslider PoomSmart/YouSlider "$ADD_YOUSLIDER"
-          build_one youmute PoomSmart/YouMute "$ADD_YOUMUTE"
           build_one ytsilentvote PoomSmart/YTSilentVote "$ADD_YTSILENTVOTE"
           build_one donteatmycontent therealFoxster/DontEatMyContent "$ADD_DONTEATMYCONTENT"
-          build_one yougetcaption PoomSmart/YouGetCaption "$ADD_YOUGETCAPTION"
           echo 'Successfully built optional DEB packages:'
           find extra-debs -maxdepth 1 -type f -name '*.deb' -print | sort
           echo 'Skipped optional tweaks:'
           cat selected-failed.txt
-
-      - name: Resolve YouSlider color picker dependencies before IPA integration
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p optional-runtime
-          test -f extra-debs/youslider.deb || exit 0
-          mkdir -p slider-check
-          dpkg-deb -x extra-debs/youslider.deb slider-check
-          slider_lib="$(find slider-check -type f -name 'YouSlider.dylib' -print -quit)"
-          if [[ -z "$slider_lib" ]]; then
-            echo 'FAILED youslider: DEB has no YouSlider.dylib' >> selected-failed.txt
-            rm -f extra-debs/youslider.deb
-            sed -i '' '/^OK youslider$/d' selected-success.txt
-            exit 0
-          fi
-          if ! otool -L "$slider_lib" | grep -Fq '@rpath/libcolorpicker.dylib'; then
-            echo 'YouSlider does not reference @rpath/libcolorpicker.dylib; no additional runtime needed.'
-            exit 0
-          fi
-          # For a sideload IPA, a jailbreak package dependency does NOT install
-          # a library into the IPA. Only use explicitly supplied real binaries.
-          picker=prebuilt-deps/libcolorpicker.dylib
-          framework=prebuilt-deps/Alderis.framework
-          if [[ ! -s "$picker" ]]; then
-            echo '::warning::YouSlider needs libcolorpicker.dylib, but prebuilt-deps/libcolorpicker.dylib is missing. Skipping YouSlider to prevent a DYLD launch crash.'
-            echo 'FAILED youslider: missing prebuilt-deps/libcolorpicker.dylib (runtime dependency)' >> selected-failed.txt
-            rm -f extra-debs/youslider.deb
-            sed -i '' '/^OK youslider$/d' selected-success.txt
-            exit 0
-          fi
-          if ! otool -hv "$picker" | grep -q 'DYLIB'; then
-            echo '::warning::Invalid libcolorpicker.dylib (not a Mach-O dynamic library); skipping YouSlider.'
-            echo 'FAILED youslider: invalid libcolorpicker.dylib' >> selected-failed.txt
-            rm -f extra-debs/youslider.deb
-            sed -i '' '/^OK youslider$/d' selected-success.txt
-            exit 0
-          fi
-          # Alderis libcolorpicker compatibility shims may require the full
-          # Alderis.framework. Passing only the shim creates a second DYLD crash.
-          if otool -L "$picker" | grep -Fq 'Alderis.framework/Alderis'; then
-            if [[ ! -s "$framework/Alderis" ]]; then
-              echo '::warning::libcolorpicker requires Alderis.framework. Both must be supplied; skipping YouSlider.'
-              echo 'FAILED youslider: Alderis.framework missing for libcolorpicker' >> selected-failed.txt
-              rm -f extra-debs/youslider.deb
-              sed -i '' '/^OK youslider$/d' selected-success.txt
-              exit 0
-            fi
-            cp -R "$framework" optional-runtime/Alderis.framework
-          fi
-          cp "$picker" optional-runtime/libcolorpicker.dylib
-          echo 'Ready: YouSlider and its supplied color picker runtime will be injected in the same cyan pass.'
 
       - name: Download decrypted IPA
         env:
@@ -379,9 +285,7 @@ jobs:
           shopt -s nullglob
           optional_debs=(extra-debs/*.deb)
           built_debs=(built-deb/*.deb)
-          runtime_files=(optional-runtime/*)
-          # Bash 3.2 with set -u treats expansion of an empty array as unbound.
-          # Construct cyan inputs with an explicit non-empty core instead.
+          # Construct cyan inputs from the YTKACE DEB and successful optional DEBs.
           if (( ${#built_debs[@]} != 1 )); then
             echo "ERROR: expected exactly one YTKACE DEB; got ${#built_debs[@]}" >&2
             exit 1
@@ -392,9 +296,6 @@ jobs:
             # Feed the YTKACE DEB and selected optional DEBs in ONE pass.
             candidate="${output%.ipa}.cyan.ipa"
             cyan_inputs=("${built_debs[0]}" "${optional_debs[@]}")
-            if (( ${#runtime_files[@]} > 0 )); then
-              cyan_inputs+=("${runtime_files[@]}")
-            fi
             if command -v cyan >/dev/null 2>&1 \
                && cyan -i YouTube.ipa -o "$candidate" -uwef "${cyan_inputs[@]}" \
                && python3 - "$candidate" "${built_debs[0]}" "${optional_debs[@]}" <<'PY_CYAN'
@@ -419,10 +320,6 @@ jobs:
                   by_name = {PurePosixPath(n).name: n for n in files if n.endswith('.dylib') and '.dSYM/' not in n}
                   missing = expected - set(by_name)
                   assert not missing, f'Cyan lost requested tweak libraries: {sorted(missing)}'
-                  if Path('optional-runtime/libcolorpicker.dylib').is_file():
-                      assert 'libcolorpicker.dylib' in by_name, 'Missing libcolorpicker in output IPA'
-                  if Path('optional-runtime/Alderis.framework/Alderis').is_file():
-                      assert any(n.endswith('/Alderis.framework/Alderis') for n in files), 'Missing Alderis.framework in output IPA'
                   for name in sorted(expected):
                       payload = z.read(by_name[name])
                       assert len(payload) > 32, f'Empty dylib: {name}'
@@ -447,8 +344,7 @@ jobs:
                               unresolved.append(name)
                   assert not unresolved, f'Unresolved CydiaSubstrate library: {unresolved}'
                   # Validate all @rpath library references of packaged tweaks.
-                  # This catches the precise YouSlider -> libcolorpicker failure
-                  # that basic 'dylib is present' verification missed.
+                  # This detects runtime dependencies not caught by a simple file-presence check.
                   binaries = [p for p in (Path(temp)/'Payload').rglob('*') if p.is_file() and (
                       p.suffix == '.dylib' or p.parent.suffix == '.framework' and p.name == p.parent.stem)]
                   present = set(files)
@@ -462,8 +358,14 @@ jobs:
                           if not dep.startswith('@rpath/'):
                               continue
                           suffix = dep[len('@rpath/'):]
-                          # A framework/lib must exist within the app bundle;
-                          # on-device jailbroken libraries are not portable.
+                          # Apple supplies standard Swift runtime libraries through
+                          # the OS/dyld shared cache. They are not required to be
+                          # bundled in the IPA; treating them as missing caused a
+                          # false FALLBACK after cyan successfully built the IPA.
+                          if '/' not in suffix and suffix.startswith('libswift') and suffix.endswith('.dylib'):
+                              continue
+                          # Non-system @rpath dependencies MUST be bundled,
+                          # including non-system runtime dependencies.
                           if not any(path.endswith('/Frameworks/' + suffix) or
                                      path.endswith('/' + suffix) for path in present):
                               missing_runtime.append((binary.name, dep))
