@@ -1,4 +1,4 @@
-name: IPA (YTKACE + selectable tweaks; IPA only)
+name: IPA (YTKACE + optional sideload tweak files)
 
 on:
   workflow_dispatch:
@@ -9,7 +9,7 @@ on:
         type: string
         default: 'https://www.dropbox.com/scl/fi/odyv50o9pgx7fh8nr8u5h/com.google.ios.youtube-21.45.4-Decrypted.ipa?rlkey=q8sq80ak1t8qr0pwe1t8f448e&st=tqx7k2kt&dl=1'
       add_ryd:
-        description: RYD dislike count (tested working; default ON)
+        description: Build RYD for Sideloadly injection (default ON; separately injected)
         type: boolean
         default: true
       add_ytuhd:
@@ -337,14 +337,16 @@ jobs:
               if lib.name in names:
                   sys.exit('Duplicate dylib name: ' + lib.name)
               names.add(lib.name)
-              selected.append(lib)
               if key == 'ryd':
                   ryd_selected.append(lib.name)
-              print('INCLUDED:', lib.name)
+                  print('RYD FOR SIDELOADLY (not in IPA):', lib)
+              else:
+                  selected.append(lib)
+                  print('INCLUDED IN IPA:', lib.name)
           Path('ryd-dylibs.txt').write_text(''.join(name + '\n' for name in ryd_selected))
           print('RYD selected libraries:', ryd_selected)
           Path('selected-dylibs.txt').write_text(''.join(str(p) + '\n' for p in selected))
-          print(f'Selected {len(selected)} additional dylibs')
+          print(f'Selected {len(selected)} additional IPA dylibs, {len(ryd_selected)} separately supplied RYD dylibs')
           PYSELECT
           if [[ "$ADD_RYD" == true && ! -s ryd-dylibs.txt ]]; then
             echo 'ERROR: RYD enabled but its library is missing' >&2
@@ -353,6 +355,14 @@ jobs:
           if [[ "$ADD_RYD" != true && -s ryd-dylibs.txt ]]; then
             echo 'ERROR: RYD disabled but its library is present' >&2
             exit 1
+          fi
+          if [[ "$ADD_RYD" == true ]]; then
+            mkdir -p ryd-for-sideloadly
+            while IFS= read -r name; do
+              file="$(find extra-root/ryd -name "$name" -type f -print -quit)"
+              test -n "$file" || { echo "Missing RYD: $name" >&2; exit 1; }
+              cp "$file" "ryd-for-sideloadly/$name"
+            done < ryd-dylibs.txt
           fi
           dylibs=()
           while IFS= read -r lib; do
@@ -377,8 +387,8 @@ jobs:
                   assert any(p.endswith('/Frameworks/' + name) for p in files), f'Missing library: {name}'
               ryd_names = pathlib.Path('ryd-dylibs.txt').read_text().splitlines()
               for name in ryd_names:
-                  assert any(p.endswith('/Frameworks/' + name) for p in files), f'Missing RYD library: {name}'
-              print('RYD libraries inside IPA:', ryd_names)
+                  assert not any(p.endswith('/Frameworks/' + name) for p in files), f'RYD must be injected with Sideloadly, not directly: {name}'
+              print('RYD files reserved for Sideloadly:', ryd_names)
           print('All selected tweak dylibs are present')
           PYVERIFY
           echo "ipa=$output" >> "$GITHUB_OUTPUT"
@@ -391,7 +401,7 @@ jobs:
             cat selected-dylibs.txt >> "$GITHUB_STEP_SUMMARY"
             echo '' >> "$GITHUB_STEP_SUMMARY"
             if [[ -s ryd-dylibs.txt ]]; then
-              echo 'RYD: enabled and verified' >> "$GITHUB_STEP_SUMMARY"
+              echo 'RYD: separate dylib; inject with Sideloadly and enable Cydia Substrate' >> "$GITHUB_STEP_SUMMARY"
               cat ryd-dylibs.txt >> "$GITHUB_STEP_SUMMARY"
             else
               echo 'RYD: not selected' >> "$GITHUB_STEP_SUMMARY"
@@ -401,6 +411,14 @@ jobs:
         with:
           name: YouTube-IPA
           path: ${{ steps.inject.outputs.ipa }}
+          if-no-files-found: error
+
+      - name: Upload RYD for Sideloadly
+        if: ${{ inputs.add_ryd }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: RYD-for-Sideloadly
+          path: ryd-for-sideloadly/*.dylib
           if-no-files-found: error
 
       - name: Trigger Release publication
