@@ -12,10 +12,6 @@ on:
         description: Return YouTube Dislikes
         type: boolean
         default: true
-      add_ytuhd:
-        description: YTUHD 4K (macOS library build; experimental)
-        type: boolean
-        default: true
       add_ytabconfig:
         description: YTABConfig
         type: boolean
@@ -42,34 +38,12 @@ jobs:
     uses: ./.github/workflows/build-deb.yml
 
   extra-tweaks:
-    runs-on: ${{ inputs.add_ytuhd && 'macos-15' || 'ubuntu-24.04' }}
+    runs-on: ubuntu-24.04
     env:
       THEOS: ${{ github.workspace }}/.theos
       CI: 'true'
     steps:
       - uses: actions/checkout@v6
-
-      - name: Show runner and selected options
-        env:
-          ADD_YTUHD: ${{ inputs.add_ytuhd }}
-          ADD_DONTEATMYCONTENT: ${{ inputs.add_donteatmycontent }}
-        run: |
-          echo "runner=$RUNNER_OS ytuhd=$ADD_YTUHD dontEat=$ADD_DONTEATMYCONTENT"
-          if [[ "$ADD_YTUHD" == 'true' && "$RUNNER_OS" != 'macOS' ]]; then
-            echo 'YTUHD requires macOS runner' >&2
-            exit 1
-          fi
-
-      - name: Install build tools for YTUHD
-        if: ${{ inputs.add_ytuhd }}
-        run: |
-          set -euo pipefail
-          brew install meson ninja pkg-config autoconf automake libtool nasm yasm
-          if ! xcrun --sdk iphoneos --show-sdk-path >/dev/null 2>&1; then
-            export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
-            echo "DEVELOPER_DIR=$DEVELOPER_DIR" >> "$GITHUB_ENV"
-          fi
-          xcrun --sdk iphoneos --show-sdk-path
 
       - name: Install Theos
         env:
@@ -88,7 +62,6 @@ jobs:
       - name: Build selected tweaks
         env:
           ADD_RYD: ${{ inputs.add_ryd }}
-          ADD_YTUHD: ${{ inputs.add_ytuhd }}
           ADD_YTABCONFIG: ${{ inputs.add_ytabconfig }}
           ADD_YOUSLIDER: ${{ inputs.add_youslider }}
           ADD_YTSILENTVOTE: ${{ inputs.add_ytsilentvote }}
@@ -127,18 +100,7 @@ jobs:
             fi
 
             make clean || true
-            if [[ "$key" == ytuhd ]]; then
-              test -d vendor/libvpx
-              test -d vendor/dav1d
-              git submodule update --init --recursive
-              make libvpx
-              make dav1d
-              test -f vendor/libvpx_ios/libvpx.a
-              test -f vendor/dav1d_ios/libdav1d.a
-              make package SIDELOAD=1 FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless DISABLE_ROOTLESS_COMPAT_WARNING=1
-            else
-              make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless DISABLE_ROOTLESS_COMPAT_WARNING=1
-            fi
+            make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless DISABLE_ROOTLESS_COMPAT_WARNING=1
             deb="$(find packages -maxdepth 1 -name '*.deb' -print -quit)"
             test -n "$deb" || { echo "No DEB from $key" >&2; exit 1; }
             cp "$deb" "../../extra-built/${key}.deb"
@@ -146,7 +108,6 @@ jobs:
           }
 
           build_tweak ryd PoomSmart/Return-YouTube-Dislikes "$ADD_RYD"
-          build_tweak ytuhd PoomSmart/YTUHD "$ADD_YTUHD"
           build_tweak ytabconfig PoomSmart/YTABConfig "$ADD_YTABCONFIG"
           build_tweak youslider PoomSmart/YouSlider "$ADD_YOUSLIDER"
           build_tweak ytsilentvote PoomSmart/YTSilentVote "$ADD_YTSILENTVOTE"
@@ -218,7 +179,7 @@ jobs:
             mkdir -p "extra-root/$key"
             dpkg-deb -x "$deb" "extra-root/$key"
           done
-          # Exclude YouQuality, YouMute, YouGetCaption and their helper YTVideoOverlay.
+          # Exclude YTUHD, YouQuality, YouMute, YouGetCaption and helper YTVideoOverlay.
           # No blanket substrate filter is used.
           # Each selected package must provide exactly one unique dylib.
           python3 - <<'PYSELECT'
@@ -226,7 +187,7 @@ jobs:
           import sys
           root = Path('extra-root')
           libs = sorted(p for p in root.rglob('*.dylib') if p.is_file())
-          excluded = {'youquality', 'youmute', 'yougetcaption', 'ytvideooverlay'}
+          excluded = {'ytuhd', 'youquality', 'youmute', 'yougetcaption', 'ytvideooverlay'}
           names = set()
           selected = []
           for lib in libs:
