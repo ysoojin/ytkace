@@ -1,4 +1,4 @@
-name: IPA (YTKACE + selected tweaks verified single-pass cyan)
+name: IPA (YTKACE + selectable tweaks, shared sideload IPA)
 
 on:
   workflow_dispatch:
@@ -9,15 +9,15 @@ on:
         type: string
         default: 'https://www.dropbox.com/scl/fi/odyv50o9pgx7fh8nr8u5h/com.google.ios.youtube-21.45.4-Decrypted.ipa?rlkey=q8sq80ak1t8qr0pwe1t8f448e&st=tqx7k2kt&dl=1'
       add_ryd:
-        description: RYD optional IPA injection (default OFF; may require Substrate)
+        description: RYD optional IPA injection (default OFF)
         type: boolean
         default: false
       add_ytuhd:
-        description: YTUHD (jailbreak-only dependency observed; default OFF)
+        description: YTUHD (default OFF)
         type: boolean
         default: false
       add_ytabconfig:
-        description: YTABConfig (crashes on non-jailbroken phone; default OFF)
+        description: YTABConfig (default OFF)
         type: boolean
         default: false
       add_youquality:
@@ -25,7 +25,7 @@ on:
         type: boolean
         default: false
       add_youslider:
-        description: YouSlider (crashes on non-jailbroken phone; default OFF)
+        description: YouSlider (default OFF)
         type: boolean
         default: false
       add_youmute:
@@ -33,7 +33,7 @@ on:
         type: boolean
         default: false
       add_ytsilentvote:
-        description: YTSilentVote (jailbreak-only dependency observed; default OFF)
+        description: YTSilentVote (default OFF)
         type: boolean
         default: false
       add_donteatmycontent:
@@ -312,6 +312,7 @@ jobs:
           PY_VER
           )"
           output="YouTube_${youtube_version}_YTKACE_${version}.ipa"
+          final_output="$output"
 
           # Preserve the known-good YTKACE-only path as a fallback.
           bash Scripts/sideload-repack.sh YouTube.ipa "$ytkace" "$output"
@@ -367,7 +368,6 @@ jobs:
                                                 b'\xca\xfe\xba\xbf', b'\xbf\xba\xfe\xca'):
                           raise AssertionError(f'{name} is not Mach-O')
                   # Check actual load commands, not arbitrary string occurrences.
-                  app = Path(temp) / 'Payload'
                   z.extractall(temp)
                   unresolved = []
                   for name in sorted(expected):
@@ -385,32 +385,45 @@ jobs:
               echo 'INTEGRATED: YTKACE and optional DEBs from original IPA in one cyan pass.'
               echo 'CAUTION: ZIP verification cannot establish device runtime compatibility.'
               integration='cyan-success'
+              # All successfully built optional packages are in the output.
+              # Failed requested tweaks remain explicitly listed in summary.
+              if [[ -s selected-failed.txt ]]; then
+                integration='cyan-partial'
+              fi
             else
               rm -f "$candidate"
               cp -f baseline-ytkace.ipa "$output"
               echo '::warning::Selected tweaks could not be validated/integrated; preserving YTKACE-only IPA.'
               echo 'FAILED optional-injection: cyan or IPA validation; YTKACE baseline retained' >> selected-failed.txt
               integration='fallback-ytkace-only'
+              final_output="YouTube_${youtube_version}_YTKACE_${version}_FALLBACK_NO_OPTIONAL_TWEAKS.ipa"
+              mv -f "$output" "$final_output"
             fi
           else
             echo 'No optional tweaks selected/built; YTKACE-only IPA retained.'
             integration='ytkace-only'
+            if [[ -s requested-tweaks.txt ]]; then
+              integration='fallback-no-optional-debs-built'
+              final_output="YouTube_${youtube_version}_YTKACE_${version}_FALLBACK_NO_OPTIONAL_TWEAKS.ipa"
+              mv -f "$output" "$final_output"
+            fi
           fi
           # The baseline must be kept intact whenever the optional integration fails.
-          python3 - "$output" <<'PY_FINAL_VERIFY'
+          python3 - "$final_output" <<'PY_FINAL_VERIFY'
           import sys, zipfile
           with zipfile.ZipFile(sys.argv[1]) as z:
               assert z.testzip() is None
               assert any(n.startswith('Payload/') and n.endswith('.app/Info.plist') for n in z.namelist())
           PY_FINAL_VERIFY
           rm -f baseline-ytkace.ipa
-          echo "ipa=$output" >> "$GITHUB_OUTPUT"
+          echo "ipa=$final_output" >> "$GITHUB_OUTPUT"
+          echo "integration=$integration" >> "$GITHUB_OUTPUT"
           echo '## Selected tweaks build and integration' >> "$GITHUB_STEP_SUMMARY"
           echo "**Integration result:** $integration" >> "$GITHUB_STEP_SUMMARY"
-          echo '### Successfully built optional DEBs' >> "$GITHUB_STEP_SUMMARY"
+          echo '### Successfully built optional DEBs (not proof of injection)' >> "$GITHUB_STEP_SUMMARY"
           if [[ -s selected-success.txt ]]; then cat selected-success.txt >> "$GITHUB_STEP_SUMMARY"; else echo 'None' >> "$GITHUB_STEP_SUMMARY"; fi
           echo '### Libraries found in final IPA' >> "$GITHUB_STEP_SUMMARY"
-          python3 - "$output" "$GITHUB_STEP_SUMMARY" <<'PY_SUMMARY'
+          python3 - "$final_output" "$GITHUB_STEP_SUMMARY" <<'PY_SUMMARY'
           import sys, zipfile
           with zipfile.ZipFile(sys.argv[1]) as z:
               libs=sorted({n.rsplit('/',1)[-1] for n in z.namelist()
@@ -423,6 +436,9 @@ jobs:
           echo '### Requested tweak options' >> "$GITHUB_STEP_SUMMARY"
           if [[ -s requested-tweaks.txt ]]; then cat requested-tweaks.txt >> "$GITHUB_STEP_SUMMARY"; else echo 'None' >> "$GITHUB_STEP_SUMMARY"; fi
           echo '**Note:** Device launch and tweak functionality are not proven by static checks.' >> "$GITHUB_STEP_SUMMARY"
+          if [[ "$integration" == fallback* ]]; then
+            echo '::warning::Requested tweaks were not included. Final IPA is marked FALLBACK in its filename.'
+          fi
 
       - uses: actions/upload-artifact@v7
         with:
@@ -466,7 +482,7 @@ jobs:
           assets=("${ipas[0]}" "${debs[0]}")
           sha256sum "${assets[@]}" > SHA256SUMS.txt
           assets+=(SHA256SUMS.txt)
-          notes='YTKACE IPA and Rootless DEB. Selected tweak DEBs, when built, are integrated from the original decrypted IPA with the YTKACE DEB in one cyan pass. Failed builds or integration are reported in Actions summary. No separate tweak artifacts. Runtime compatibility not guaranteed.'
+          notes='YTKACE IPA and Rootless DEB. Selected tweak DEBs, when built, are integrated from the original decrypted IPA in one cyan pass. See Actions summary for included/failed tweaks. A FALLBACK filename means optional tweaks were NOT injected. No individual tweak artifacts. Device compatibility requires testing.'
           if gh release view "$RELEASE_TAG" --repo "$REPO" >/dev/null 2>&1; then
             gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber --repo "$REPO"
           else
