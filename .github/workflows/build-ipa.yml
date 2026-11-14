@@ -9,7 +9,7 @@ on:
         type: string
         default: 'https://www.dropbox.com/scl/fi/odyv50o9pgx7fh8nr8u5h/com.google.ios.youtube-21.45.4-Decrypted.ipa?rlkey=q8sq80ak1t8qr0pwe1t8f448e&st=tqx7k2kt&dl=1'
       add_ryd:
-        description: RYD for Sideloadly artifact (default OFF)
+        description: RYD (.dylib) for Sideloadly - optional, default OFF
         type: boolean
         default: false
       add_ytuhd:
@@ -328,6 +328,31 @@ jobs:
         with:
           name: Sideloadly-Selected-Tweaks
           path: sideloadly-tweaks/
+          if-no-files-found: error
+
+      - name: Verify optional RYD library for Sideloadly
+        if: ${{ inputs.add_ryd }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s sideloadly-tweaks/YouTubeDislikesReturn.dylib || {
+            echo 'ERROR: RYD was selected, but YouTubeDislikesReturn.dylib is missing' >&2
+            exit 1
+          }
+          mkdir -p ryd-for-sideloadly
+          cp sideloadly-tweaks/YouTubeDislikesReturn.dylib ryd-for-sideloadly/
+          printf '%s\n' \
+            'RYD for Sideloadly' \
+            'Only use this file when you deliberately enable RYD injection in Sideloadly.' \
+            'A compatible substrate/hooking runtime may also be required.' \
+            > ryd-for-sideloadly/README.txt
+
+      - name: Upload RYD-for-Sideloadly (when checked)
+        if: ${{ inputs.add_ryd }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: RYD-for-Sideloadly
+          path: ryd-for-sideloadly/
           if-no-files-found: error
 
   package:
