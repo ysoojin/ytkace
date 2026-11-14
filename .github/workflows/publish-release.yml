@@ -1,9 +1,6 @@
 name: Publish YouTube Release
 
 on:
-  workflow_run:
-    workflows: ['IPA (YTKACE + optional Sideloadly tweak artifacts)']
-    types: [completed]
   workflow_dispatch:
     inputs:
       run_id:
@@ -16,17 +13,16 @@ permissions:
   contents: write
 
 concurrency:
-  group: publish-youtube-${{ github.event.workflow_run.id || inputs.run_id }}
+  group: publish-youtube-${{ inputs.run_id }}
   cancel-in-progress: false
 
 jobs:
   publish:
-    if: ${{ github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.event == 'workflow_dispatch') }}
     runs-on: ubuntu-24.04
     env:
       GH_TOKEN: ${{ github.token }}
       REPO: ${{ github.repository }}
-      RUN_ID: ${{ github.event.workflow_run.id || inputs.run_id }}
+      RUN_ID: ${{ inputs.run_id }}
     steps:
       - name: Check source workflow run
         id: source

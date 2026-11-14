@@ -50,7 +50,7 @@ on:
         default: false
 
 permissions:
-  contents: read
+  contents: write
   actions: write
 
 jobs:
@@ -474,3 +474,61 @@ jobs:
           path: ${{ steps.inject.outputs.ipa }}
           if-no-files-found: error
 
+  publish-release:
+    name: Publish IPA + DEB to GitHub Releases
+    needs: [ytkace, extra-tweaks, package]
+    # Skipped optional tweaks are normal; package must actually succeed.
+    if: ${{ always() && github.ref == 'refs/heads/main' && needs.ytkace.result == 'success' && needs.package.result == 'success' && (needs.extra-tweaks.result == 'success' || needs.extra-tweaks.result == 'skipped') }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      actions: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      RELEASE_TAG: youtube-build-${{ github.run_id }}
+    steps:
+      - name: Download final IPA
+        uses: actions/download-artifact@v8
+        with:
+          name: YouTube-IPA
+          path: release-files/ipa
+
+      - name: Download YTKACE Rootless DEB
+        uses: actions/download-artifact@v8
+        with:
+          name: YTKACE-deb-rootless
+          path: release-files/deb
+
+      - name: Validate and publish release
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          ipas=(release-files/ipa/*.ipa)
+          debs=(release-files/deb/*.deb)
+          if (( ${#ipas[@]} != 1 || ${#debs[@]} != 1 )); then
+            printf 'Expected exactly one IPA and one DEB; found IPA=%d DEB=%d\n' "${#ipas[@]}" "${#debs[@]}" >&2
+            exit 1
+          fi
+          python3 - "${ipas[0]}" <<'PY_IPA'
+          import sys,zipfile
+          with zipfile.ZipFile(sys.argv[1]) as z:
+              if not any(s.startswith('Payload/') and s.endswith('.app/Info.plist') for s in z.namelist()):
+                  raise SystemExit('IPA missing Payload/*.app/Info.plist')
+          PY_IPA
+          dpkg-deb --info "${debs[0]}" >/dev/null
+          sha256sum "${ipas[0]}" "${debs[0]}" > SHA256SUMS.txt
+          if gh release view "$RELEASE_TAG" --repo "$REPO" >/dev/null 2>&1; then
+            echo "Release $RELEASE_TAG already exists; uploading updated assets."
+            gh release upload "$RELEASE_TAG" "${ipas[0]}" "${debs[0]}" SHA256SUMS.txt --clobber --repo "$REPO"
+          else
+            gh release create "$RELEASE_TAG" \
+              --repo "$REPO" \
+              --target "$GITHUB_SHA" \
+              --title "YouTube IPA + YTKACE DEB (run $GITHUB_RUN_ID)" \
+              --notes "YTKACE IPA and Rootless DEB. Additional selected tweaks (including Sideloadly RYD) are available only in the Actions artifacts for build run $GITHUB_RUN_ID; they are not automatically injected into the IPA unless direct injection was explicitly selected." \
+              "${ipas[0]}" "${debs[0]}" SHA256SUMS.txt
+          fi
+          echo "### GitHub Release" >> "$GITHUB_STEP_SUMMARY"
+          echo "https://github.com/$REPO/releases/tag/$RELEASE_TAG" >> "$GITHUB_STEP_SUMMARY"
