@@ -15,35 +15,27 @@ on:
       add_ytuhd:
         description: YTUHD 4K (macOS library build; experimental)
         type: boolean
-        default: false
+        default: true
       add_ytabconfig:
         description: YTABConfig
         type: boolean
-        default: false
-      add_youquality:
-        description: YouQuality
-        type: boolean
-        default: false
+        default: true
       add_youslider:
         description: YouSlider
         type: boolean
-        default: false
-      add_youmute:
-        description: YouMute
-        type: boolean
-        default: false
+        default: true
       add_ytsilentvote:
         description: YTSilentVote
         type: boolean
-        default: false
+        default: true
       add_donteatmycontent:
         description: DontEatMyContent (duplicate symbol fix)
         type: boolean
-        default: false
+        default: true
       add_yougetcaption:
         description: YouGetCaption
         type: boolean
-        default: false
+        default: true
 
 permissions:
   contents: read
@@ -102,9 +94,7 @@ jobs:
           ADD_RYD: ${{ inputs.add_ryd }}
           ADD_YTUHD: ${{ inputs.add_ytuhd }}
           ADD_YTABCONFIG: ${{ inputs.add_ytabconfig }}
-          ADD_YOUQUALITY: ${{ inputs.add_youquality }}
           ADD_YOUSLIDER: ${{ inputs.add_youslider }}
-          ADD_YOUMUTE: ${{ inputs.add_youmute }}
           ADD_YTSILENTVOTE: ${{ inputs.add_ytsilentvote }}
           ADD_DONTEATMYCONTENT: ${{ inputs.add_donteatmycontent }}
           ADD_YOUGETCAPTION: ${{ inputs.add_yougetcaption }}
@@ -120,9 +110,6 @@ jobs:
             fi
             echo "Building $key from $repo"
             local checkout="sources/$key"
-            if [[ "$key" == ytvideooverlay ]]; then
-              checkout="sources/YTVideoOverlay"
-            fi
             git clone --depth 1 --recurse-submodules "https://github.com/${repo}.git" "$checkout"
             pushd "$checkout"
 
@@ -163,15 +150,10 @@ jobs:
             popd
           }
 
-          if [[ "$ADD_YOUQUALITY" == true || "$ADD_YOUMUTE" == true ]]; then
-            build_tweak ytvideooverlay PoomSmart/YTVideoOverlay true
-          fi
           build_tweak ryd PoomSmart/Return-YouTube-Dislikes "$ADD_RYD"
           build_tweak ytuhd PoomSmart/YTUHD "$ADD_YTUHD"
           build_tweak ytabconfig PoomSmart/YTABConfig "$ADD_YTABCONFIG"
-          build_tweak youquality PoomSmart/YouQuality "$ADD_YOUQUALITY"
           build_tweak youslider PoomSmart/YouSlider "$ADD_YOUSLIDER"
-          build_tweak youmute PoomSmart/YouMute "$ADD_YOUMUTE"
           build_tweak ytsilentvote PoomSmart/YTSilentVote "$ADD_YTSILENTVOTE"
           build_tweak donteatmycontent therealFoxster/DontEatMyContent "$ADD_DONTEATMYCONTENT"
           build_tweak yougetcaption PoomSmart/YouGetCaption "$ADD_YOUGETCAPTION"
@@ -242,115 +224,39 @@ jobs:
             mkdir -p "extra-root/$key"
             dpkg-deb -x "$deb" "extra-root/$key"
           done
-          # Scan Mach-O load commands and reject jailbreak-only dependencies.
-          # Repeat the check for tweaks that depend on an excluded tweak.
-          python3 - "$ytkace" <<'PYFILTER'
+          # Preserve all selected extras except the removed YouQuality, YouMute,
+          # and their helper YTVideoOverlay. No blanket substrate filter is used.
+          # Each selected package must provide exactly one unique dylib.
+          python3 - <<'PYSELECT'
           from pathlib import Path
-          import subprocess, sys
-
-          libs = sorted(Path('extra-root').rglob('*.dylib'))
-          libs = [p for p in libs if p.is_file()]
-          if len(libs) != len({p.name for p in libs}):
-              raise SystemExit('Duplicate dylib basenames; refusing ambiguous injection')
-
-          def dependencies(path):
-              result = subprocess.run(['otool', '-L', str(path)],
-                                      capture_output=True, text=True, check=True)
-              lines = result.stdout.splitlines()[1:]
-              return [line.strip().split(' (compatibility version', 1)[0]
-                      .split(' (current version', 1)[0]
-                      for line in lines if line.strip()]
-
-          forbidden = ('cydiasubstrate', 'mobilesubstrate', 'libsubstrate',
-                       'libhooker', '/substitute', 'substitute.dylib')
-          def unsupported(dep):
-              name = dep.lower()
-              return any(word in name for word in forbidden)
-
-          base = Path(sys.argv[1])
-          base_bad = [d for d in dependencies(base) if unsupported(d)]
-          if base_bad:
-              raise SystemExit('YTKACE itself requires jailbreak libraries: ' +
-                               ', '.join(base_bad))
-          deps = {p.name: dependencies(p) for p in libs}
-          excluded = {}
-          for name, items in deps.items():
-              bad = [d for d in items if unsupported(d)]
-              if bad:
-                  excluded[name] = 'jailbreak dependency: ' + ', '.join(bad)
-
-          # Reject downstream dependents whenever a required dylib was removed.
-          changed = True
-          while changed:
-              changed = False
-              for name, items in deps.items():
-                  if name in excluded:
-                      continue
-                  for dep in items:
-                      required = dep.rsplit('/', 1)[-1]
-                      if required in excluded:
-                          excluded[name] = 'depends on excluded ' + required
-                          changed = True
-                          break
-
-          # Fail safely for direct non-system @rpath dependencies missing from
-          # both the candidate set and the base app's Frameworks folder.
-          import zipfile
-          with zipfile.ZipFile('YouTube.ipa') as archive:
-              existing = {part for n in archive.namelist()
-                          if '/Frameworks/' in n
-                          for part in n.split('/') if part}
-          names = set(deps) | {base.name} | existing
-          for name, items in deps.items():
-              if name in excluded:
+          import sys
+          root = Path('extra-root')
+          libs = sorted(p for p in root.rglob('*.dylib') if p.is_file())
+          excluded = {'youquality', 'youmute', 'ytvideooverlay'}
+          names = set()
+          selected = []
+          for lib in libs:
+              key = lib.relative_to(root).parts[0].lower()
+              if key in excluded or lib.name.lower() == 'ytvideooverlay.dylib':
+                  print('SKIP blocked tweak:', lib)
                   continue
-              for dep in items:
-                  if dep.startswith(('@rpath/', '@loader_path/')):
-                      required = dep.rsplit('/', 1)[-1]
-                      if required not in names:
-                          # Frameworks embed their executable under Foo.framework/Foo;
-                          # compare the directory name, not just the executable.
-                          framework = next((part for part in dep.split('/')
-                                            if part.endswith('.framework')), None)
-                          if framework not in existing:
-                              excluded[name] = 'unbundled library: ' + dep
-                              break
-
-          # One further dependency pass handles any newly excluded libraries.
-          changed = True
-          while changed:
-              changed = False
-              for name, items in deps.items():
-                  if name in excluded:
-                      continue
-                  for dep in items:
-                      required = dep.rsplit('/', 1)[-1]
-                      if required in excluded:
-                          excluded[name] = 'depends on excluded ' + required
-                          changed = True
-                          break
-
-          selected = [p for p in libs if p.name not in excluded]
-          for name, reason in sorted(excluded.items()):
-              print('SKIPPED ' + name + ': ' + reason)
-          for p in selected:
-              print('INCLUDED ' + p.name)
-          Path('safe-dylibs.txt').write_text(''.join(str(p) + '\n' for p in selected))
-          Path('excluded-dylibs.txt').write_text(''.join(
-              name + ': ' + reason + '\n' for name, reason in sorted(excluded.items())))
-          print(f'Safe extras: {len(selected)} / {len(libs)}')
-          PYFILTER
-          # Bash 3.2 + set -u cannot safely expand an empty array.
+              if lib.name in names:
+                  sys.exit('Duplicate dylib name: ' + lib.name)
+              names.add(lib.name)
+              selected.append(lib)
+              print('INCLUDED:', lib.name)
+          Path('selected-dylibs.txt').write_text(''.join(str(p) + '\n' for p in selected))
+          print(f'Selected {len(selected)} additional dylibs')
+          PYSELECT
           dylibs=()
           while IFS= read -r lib; do
             if [[ -n "$lib" ]]; then
               dylibs+=("$lib")
             fi
-          done < safe-dylibs.txt
-          if [[ -s safe-dylibs.txt ]]; then
+          done < selected-dylibs.txt
+          if [[ -s selected-dylibs.txt ]]; then
             bash Scripts/sideload-repack.sh YouTube.ipa "$ytkace" "$output" "${dylibs[@]}"
           else
-            echo "All optional tweaks excluded; packaging YTKACE only"
             bash Scripts/sideload-repack.sh YouTube.ipa "$ytkace" "$output"
           fi
           bash Tools/verify-artifacts.sh "$ytkace" "$output"
@@ -360,19 +266,19 @@ jobs:
           with zipfile.ZipFile(sys.argv[1]) as z:
               files = set(z.namelist())
               expected = [pathlib.Path(line.strip()).name for line in
-                          pathlib.Path('safe-dylibs.txt').read_text().splitlines() if line.strip()]
+                          pathlib.Path('selected-dylibs.txt').read_text().splitlines() if line.strip()]
               for name in expected:
                   assert any(p.endswith('/Frameworks/' + name) for p in files), f'Missing library: {name}'
           print('All requested dylibs are present')
           PYVERIFY
           echo "ipa=$output" >> "$GITHUB_OUTPUT"
-      - name: Report excluded tweaks
+      - name: Report included tweaks
         if: always()
         shell: bash
         run: |
-          if [[ -f excluded-dylibs.txt ]]; then
-            echo '### Excluded jailbreak-dependent tweaks' >> "$GITHUB_STEP_SUMMARY"
-            cat excluded-dylibs.txt >> "$GITHUB_STEP_SUMMARY"
+          if [[ -f selected-dylibs.txt ]]; then
+            echo '### Injected extra dylibs' >> "$GITHUB_STEP_SUMMARY"
+            cat selected-dylibs.txt >> "$GITHUB_STEP_SUMMARY"
           fi
       - uses: actions/upload-artifact@v7
         with:
