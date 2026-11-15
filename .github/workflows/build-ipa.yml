@@ -1,4 +1,4 @@
-name: IPA (RYD identifier audit v7.2, scope fix and required RYD)
+name: IPA (RYD v8 button renderer structure audit, required RYD)
 
 on:
   workflow_dispatch:
@@ -395,6 +395,79 @@ jobs:
           '''
           t = replace_once(t, v6_entry + v6_code, v6_entry + v6_code + v7_code,
               'v7 scoped identifier collection')
+          # v8: inspect only the *structure* of bounded node trees. Never store
+          # unredacted accessibility identifiers, video IDs, labels or text.
+          v8_code = r'''
+              static NSUInteger rydV8Roots = 0;
+              static NSUInteger rydV8Budget = 0;
+              if (rydV8Roots < 500 && rydV8Budget < 5000 && node != nil) {
+                  rydV8Roots++;
+                  NSMutableArray *pending = [NSMutableArray arrayWithObject:@[node, @(0)]];
+                  NSUInteger scanned = 0;
+                  BOOL sawLike = NO;
+                  BOOL sawDislike = NO;
+                  BOOL sawAction = NO;
+                  BOOL sawRolling = NO;
+                  NSUInteger bestDepth = 0;
+                  NSString *bestClass = @"none";
+                  while (pending.count > 0 && scanned < 80 && rydV8Budget < 5000) {
+                      NSArray *entry = [pending lastObject];
+                      [pending removeLastObject];
+                      id current = entry[0];
+                      NSUInteger depth = [entry[1] unsignedIntegerValue];
+                      scanned++; rydV8Budget++;
+                      if (depth > 8) continue;
+                      NSString *ident = nil;
+                      @try {
+                          if ([current respondsToSelector:@selector(accessibilityIdentifier)])
+                              ident = [current accessibilityIdentifier];
+                      } @catch (NSException *exception) { ident = nil; }
+                      NSString *lower = [ident isKindOfClass:[NSString class]] ? [ident lowercaseString] : @"";
+                      BOOL like = [lower containsString:@"like"] && ![lower containsString:@"dislike"];
+                      BOOL dislike = [lower containsString:@"dislike"];
+                      BOOL action = [lower containsString:@"action_bar"];
+                      BOOL rolling = [current isKindOfClass:%c(YTRollingNumberNode)];
+                      sawLike |= like; sawDislike |= dislike; sawAction |= action; sawRolling |= rolling;
+                      if (dislike && [bestClass isEqualToString:@"none"]) {
+                          bestClass = NSStringFromClass([current class]);
+                          bestDepth = depth;
+                      }
+                      NSArray *children = nil;
+                      @try {
+                          if ([current respondsToSelector:@selector(yogaChildren)])
+                              children = [current yogaChildren];
+                      } @catch (NSException *exception) { children = nil; }
+                      if (![children isKindOfClass:[NSArray class]]) continue;
+                      // At most 80 nodes per root; do not let a malformed tree loop indefinitely.
+                      NSUInteger count = MIN([children count], 16);
+                      for (NSUInteger k = 0; k < count; k++) {
+                          id child = children[k];
+                          if (child && child != current && pending.count < 100)
+                              [pending addObject:@[child, @(depth + 1)]];
+                      }
+                  }
+                  if (sawLike || sawDislike || sawAction || sawRolling) {
+                      NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+                      @synchronized(defaults) {
+                          [defaults setInteger:[defaults integerForKey:@"RYDV8MatchedRoots"] + 1 forKey:@"RYDV8MatchedRoots"];
+                          if (sawLike) [defaults setInteger:[defaults integerForKey:@"RYDV8LikeRoots"] + 1 forKey:@"RYDV8LikeRoots"];
+                          if (sawDislike) [defaults setInteger:[defaults integerForKey:@"RYDV8DislikeRoots"] + 1 forKey:@"RYDV8DislikeRoots"];
+                          if (sawAction) [defaults setInteger:[defaults integerForKey:@"RYDV8ActionRoots"] + 1 forKey:@"RYDV8ActionRoots"];
+                          if (sawRolling) [defaults setInteger:[defaults integerForKey:@"RYDV8RollingRoots"] + 1 forKey:@"RYDV8RollingRoots"];
+                          if (sawDislike && ![defaults objectForKey:@"RYDV8DislikeShape"])
+                              [defaults setObject:[NSString stringWithFormat:@"class=%@ depth=%lu", bestClass, (unsigned long)bestDepth] forKey:@"RYDV8DislikeShape"];
+                          if (sawLike && sawDislike)
+                              [defaults setInteger:[defaults integerForKey:@"RYDV8PairRoots"] + 1 forKey:@"RYDV8PairRoots"];
+                      }
+                  }
+                  NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+                  [defaults setInteger:rydV8Roots forKey:@"RYDV8Roots"];
+                  [defaults setInteger:rydV8Budget forKey:@"RYDV8Budget"];
+              }
+          '''
+          t = replace_once(t, v6_entry + v6_code + v7_code,
+              v6_entry + v6_code + v7_code + v8_code,
+              'v8 bounded button node tree audit')
           settings = root / 'Settings.x'
           if not settings.is_file():
               sys.exit('RYD on-device diagnostics: Settings.x missing')
@@ -689,7 +762,48 @@ jobs:
               settingItemId:0];
           [sectionItems addObject:v7Item];
           '''
-          contents = contents.replace(anchor, anchor + '\n' + diagnostic_item + '\n' + compatibility_item + '\n' + action_path_item + '\n' + v6_item + '\n' + v7_item, 1)
+          v8_item = r'''
+          YTSettingsSectionItem *v8Item = [%c(YTSettingsSectionItem) switchItemWithTitle:@"RYD 버튼 렌더러 검사 v8 (탭)"
+              titleDescription:@"앱 화면 노드 트리에서 좋아요·싫어요 버튼 유무 확인 (내용 수집 안 함)"
+              accessibilityIdentifier:nil
+              switchOn:NO
+              switchBlock:^BOOL (YTSettingsCell *cell, BOOL newValue) {
+                  NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+                  NSArray *rows = @[
+                      @[@"검사 루트", @"RYDV8Roots"],
+                      @[@"탐색 노드", @"RYDV8Budget"],
+                      @[@"버튼 관련 루트", @"RYDV8MatchedRoots"],
+                      @[@"좋아요 포함", @"RYDV8LikeRoots"],
+                      @[@"싫어요 포함", @"RYDV8DislikeRoots"],
+                      @[@"좋아요+싫어요 함께", @"RYDV8PairRoots"],
+                      @[@"액션바 포함", @"RYDV8ActionRoots"],
+                      @[@"숫자 노드 포함", @"RYDV8RollingRoots"]
+                  ];
+                  NSMutableArray *lines = [NSMutableArray arrayWithObject:@"RYD v8 | bounded renderer structure audit"];
+                  for (NSArray *pair in rows) {
+                      [lines addObject:[NSString stringWithFormat:@"%@: %ld", pair[0], (long)[d integerForKey:pair[1]]]];
+                  }
+                  [lines addObject:[NSString stringWithFormat:@"싫어요 구조: %@", [d stringForKey:@"RYDV8DislikeShape"] ?: @"기록 없음"]];
+                  [lines addObject:@"식별자·영상 ID·화면 텍스트는 기록하지 않습니다."];
+                  NSString *report = [lines componentsJoinedByString:@"\n"];
+                  UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"RYD 렌더러 검사 v8"
+                      message:report preferredStyle:UIAlertControllerStyleAlert];
+                  [alert addAction:[UIAlertAction actionWithTitle:@"복사" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+                      [UIPasteboard generalPasteboard].string = report;
+                  }]];
+                  [alert addAction:[UIAlertAction actionWithTitle:@"초기화" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *a) {
+                      for (NSArray *pair in rows) [d removeObjectForKey:pair[1]];
+                      [d removeObjectForKey:@"RYDV8DislikeShape"];
+                  }]];
+                  [alert addAction:[UIAlertAction actionWithTitle:@"닫기" style:UIAlertActionStyleCancel handler:nil]];
+                  dispatch_async(dispatch_get_main_queue(), ^{ [delegate presentViewController:alert animated:YES completion:nil]; });
+                  return NO;
+              }
+              settingItemId:0];
+          [sectionItems addObject:v8Item];
+          '''
+
+          contents = contents.replace(anchor, anchor + '\n' + diagnostic_item + '\n' + compatibility_item + '\n' + action_path_item + '\n' + v6_item + '\n' + v7_item + '\n' + v8_item, 1)
 
           contents = '#import <objc/runtime.h>\n#import <UIKit/UIKit.h>\n' + contents
           # Constructor runs when RYD's dylib is loaded, before screen-specific hooks.
