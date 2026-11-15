@@ -1,4 +1,4 @@
-name: IPA (RYD v8 button renderer structure audit, required RYD)
+name: IPA (RYD v9 button and number ancestry audit, required RYD)
 
 on:
   workflow_dispatch:
@@ -468,6 +468,101 @@ jobs:
           t = replace_once(t, v6_entry + v6_code + v7_code,
               v6_entry + v6_code + v7_code + v8_code,
               'v8 bounded button node tree audit')
+          # v9: independently inspect a small bounded sample of node ancestry.
+          # Record only class names, depths and counts. No labels, IDs, video
+          # identifiers, content strings, pointers, or object descriptions.
+          v9_code = r'''
+              static NSUInteger rydV9Roots = 0;
+              static NSUInteger rydV9Nodes = 0;
+              if (node != nil && rydV9Roots < 350 && rydV9Nodes < 4000) {
+                  rydV9Roots++;
+                  NSMutableArray *queue = [NSMutableArray arrayWithObject:
+                      @[node, @(0), @[[NSValue valueWithNonretainedObject:node]], @"none"]];
+                  NSMutableSet *visited = [NSMutableSet set];
+                  NSArray *likePath = nil;
+                  NSArray *dislikePath = nil;
+                  NSArray *numberPath = nil;
+                  NSString *likeParent = @"none";
+                  NSString *dislikeParent = @"none";
+                  NSString *numberParent = @"none";
+                  NSUInteger likeDepth = 0, dislikeDepth = 0, numberDepth = 0;
+                  NSUInteger local = 0;
+                  while (queue.count && local < 40 && rydV9Nodes < 4000) {
+                      NSArray *entry = [queue lastObject];
+                      [queue removeLastObject];
+                      id current = entry[0];
+                      NSUInteger depth = [entry[1] unsignedIntegerValue];
+                      NSArray *path = entry[2];
+                      NSString *parentClass = entry[3];
+                      NSValue *identity = [NSValue valueWithNonretainedObject:current];
+                      if ([visited containsObject:identity]) continue;
+                      [visited addObject:identity];
+                      local++; rydV9Nodes++;
+                      if (depth > 8) continue;
+                      NSString *ident = nil;
+                      @try {
+                          if ([current respondsToSelector:@selector(accessibilityIdentifier)])
+                              ident = [current accessibilityIdentifier];
+                      } @catch (NSException *e) { ident = nil; }
+                      NSString *lower = [ident isKindOfClass:[NSString class]] ? [ident lowercaseString] : @"";
+                      BOOL isDislike = [lower containsString:@"dislike"];
+                      BOOL isLike = !isDislike && [lower containsString:@"like"];
+                      BOOL isNumber = [current isKindOfClass:%c(YTRollingNumberNode)];
+                      if (isLike && likePath == nil) {
+                          likePath = path; likeParent = parentClass; likeDepth = depth;
+                      }
+                      if (isDislike && dislikePath == nil) {
+                          dislikePath = path; dislikeParent = parentClass; dislikeDepth = depth;
+                      }
+                      if (isNumber && numberPath == nil) {
+                          numberPath = path; numberParent = parentClass; numberDepth = depth;
+                      }
+                      NSArray *children = nil;
+                      @try {
+                          if ([current respondsToSelector:@selector(yogaChildren)])
+                              children = [current yogaChildren];
+                      } @catch (NSException *e) { children = nil; }
+                      if (![children isKindOfClass:[NSArray class]]) continue;
+                      for (id child in [children subarrayWithRange:NSMakeRange(0, MIN([children count], 12))]) {
+                          if (!child || child == current || queue.count >= 90) continue;
+                          NSArray *childPath = [path arrayByAddingObject:[NSValue valueWithNonretainedObject:child]];
+                          NSString *cls = NSStringFromClass([current class]) ?: @"unknown";
+                          [queue addObject:@[child, @(depth + 1), childPath, cls]];
+                      }
+                  }
+                  NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+                  @synchronized(d) {
+                      if (dislikePath) [d setInteger:[d integerForKey:@"RYDV9DislikeRoots"] + 1 forKey:@"RYDV9DislikeRoots"];
+                      if (numberPath) [d setInteger:[d integerForKey:@"RYDV9NumberRoots"] + 1 forKey:@"RYDV9NumberRoots"];
+                      if (dislikePath && numberPath) {
+                          [d setInteger:[d integerForKey:@"RYDV9DislikeNumberRoots"] + 1 forKey:@"RYDV9DislikeNumberRoots"];
+                          if (![d objectForKey:@"RYDV9DislikeNumberShape"]) {
+                              NSUInteger common = 0;
+                              while (common < MIN(dislikePath.count, numberPath.count) &&
+                                     [dislikePath[common] isEqual:numberPath[common]]) common++;
+                              [d setObject:[NSString stringWithFormat:
+                                  @"dislikeParent=%@ depth=%lu; numberParent=%@ depth=%lu; commonAncestorDepth=%ld",
+                                  dislikeParent, (unsigned long)dislikeDepth, numberParent, (unsigned long)numberDepth,
+                                  (long)common - 1] forKey:@"RYDV9DislikeNumberShape"];
+                          }
+                      }
+                      if (likePath && dislikePath && ![d objectForKey:@"RYDV9LikeDislikeShape"]) {
+                          NSUInteger common = 0;
+                          while (common < MIN(likePath.count, dislikePath.count) &&
+                                 [likePath[common] isEqual:dislikePath[common]]) common++;
+                          [d setObject:[NSString stringWithFormat:
+                              @"likeParent=%@ depth=%lu; dislikeParent=%@ depth=%lu; commonAncestorDepth=%ld",
+                              likeParent, (unsigned long)likeDepth, dislikeParent, (unsigned long)dislikeDepth,
+                              (long)common - 1] forKey:@"RYDV9LikeDislikeShape"];
+                      }
+                      [d setInteger:rydV9Roots forKey:@"RYDV9Roots"];
+                      [d setInteger:rydV9Nodes forKey:@"RYDV9Nodes"];
+                  }
+              }
+          '''
+          t = replace_once(t, v6_entry + v6_code + v7_code + v8_code,
+              v6_entry + v6_code + v7_code + v8_code + v9_code,
+              'v9 bounded node ancestry audit')
           settings = root / 'Settings.x'
           if not settings.is_file():
               sys.exit('RYD on-device diagnostics: Settings.x missing')
@@ -803,7 +898,45 @@ jobs:
           [sectionItems addObject:v8Item];
           '''
 
-          contents = contents.replace(anchor, anchor + '\n' + diagnostic_item + '\n' + compatibility_item + '\n' + action_path_item + '\n' + v6_item + '\n' + v7_item + '\n' + v8_item, 1)
+          v9_item = r'''
+          YTSettingsSectionItem *v9Item = [%c(YTSettingsSectionItem) switchItemWithTitle:@"RYD 버튼-숫자 연결 검사 v9 (탭)"
+              titleDescription:@"버튼과 숫자 노드의 부모 및 공통 조상 구조 검사 (개인정보 저장 안 함)"
+              accessibilityIdentifier:nil
+              switchOn:NO
+              switchBlock:^BOOL (YTSettingsCell *cell, BOOL newValue) {
+                  NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+                  NSArray *rows = @[
+                      @[@"관찰 루트", @"RYDV9Roots"],
+                      @[@"관찰 노드", @"RYDV9Nodes"],
+                      @[@"싫어요 포함 루트", @"RYDV9DislikeRoots"],
+                      @[@"숫자 포함 루트", @"RYDV9NumberRoots"],
+                      @[@"싫어요+숫자 공존 루트", @"RYDV9DislikeNumberRoots"]
+                  ];
+                  NSMutableArray *lines = [NSMutableArray arrayWithObject:@"RYD v9 | button and number ancestry audit"];
+                  for (NSArray *pair in rows)
+                      [lines addObject:[NSString stringWithFormat:@"%@: %ld", pair[0], (long)[d integerForKey:pair[1]]]];
+                  [lines addObject:[NSString stringWithFormat:@"좋아요-싫어요 관계: %@", [d stringForKey:@"RYDV9LikeDislikeShape"] ?: @"기록 없음"]];
+                  [lines addObject:[NSString stringWithFormat:@"싫어요-숫자 관계: %@", [d stringForKey:@"RYDV9DislikeNumberShape"] ?: @"기록 없음"]];
+                  [lines addObject:@"메서드 호출과 실제 버튼 연결 여부를 확정하는 검사는 아닙니다."];
+                  NSString *report = [lines componentsJoinedByString:@"\n"];
+                  UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"RYD 연결 구조 검사 v9"
+                      message:report preferredStyle:UIAlertControllerStyleAlert];
+                  [alert addAction:[UIAlertAction actionWithTitle:@"복사" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+                      [UIPasteboard generalPasteboard].string = report;
+                  }]];
+                  [alert addAction:[UIAlertAction actionWithTitle:@"초기화" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *a) {
+                      for (NSArray *pair in rows) [d removeObjectForKey:pair[1]];
+                      [d removeObjectForKey:@"RYDV9LikeDislikeShape"];
+                      [d removeObjectForKey:@"RYDV9DislikeNumberShape"];
+                  }]];
+                  [alert addAction:[UIAlertAction actionWithTitle:@"닫기" style:UIAlertActionStyleCancel handler:nil]];
+                  dispatch_async(dispatch_get_main_queue(), ^{ [delegate presentViewController:alert animated:YES completion:nil]; });
+                  return NO;
+              }
+              settingItemId:0];
+          [sectionItems addObject:v9Item];
+          '''
+          contents = contents.replace(anchor, anchor + '\n' + diagnostic_item + '\n' + compatibility_item + '\n' + action_path_item + '\n' + v6_item + '\n' + v7_item + '\n' + v8_item + '\n' + v9_item, 1)
 
           contents = '#import <objc/runtime.h>\n#import <UIKit/UIKit.h>\n' + contents
           # Constructor runs when RYD's dylib is loaded, before screen-specific hooks.
@@ -1181,7 +1314,7 @@ jobs:
           echo '### Requested tweak options' >> "$GITHUB_STEP_SUMMARY"
           if [[ -s requested-tweaks.txt ]]; then cat requested-tweaks.txt >> "$GITHUB_STEP_SUMMARY"; else echo 'None' >> "$GITHUB_STEP_SUMMARY"; fi
           echo '**RYD:** Executable-based substrate filter applied when requested; if the dislike count still does not appear, test RYD alone because current YouTube UI layouts and other tweaks may conflict.' >> "$GITHUB_STEP_SUMMARY"
-          echo '**RYD diagnostics v7:** On iPhone open YouTube > Settings > Return YouTube Dislike > RYD 진단 보기 (탭). Run RYD API 직접 검사 on the iPhone, then watch a video and Short; open RYD 진단 보기 and copy the results. A Mac is NOT required. If the setting entry is absent or the build failed, check the build summary.' >> "$GITHUB_STEP_SUMMARY"
+          echo '**RYD diagnostics v9:** On iPhone open YouTube > Settings > Return YouTube Dislike > RYD 진단 보기 (탭). Run RYD API 직접 검사 on the iPhone, then watch a video and Short; open RYD 진단 보기 and copy the results. A Mac is NOT required. If the setting entry is absent or the build failed, check the build summary.' >> "$GITHUB_STEP_SUMMARY"
           echo '**Note:** CI API testing cannot prove iPhone connectivity, runtime hook invocation, or dislike display.' >> "$GITHUB_STEP_SUMMARY"
           if [[ "$integration" == fallback* ]]; then
             echo '::warning::Requested tweaks were not included. Final IPA is marked FALLBACK in its filename.'
