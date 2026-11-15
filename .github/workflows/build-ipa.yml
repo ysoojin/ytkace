@@ -1,4 +1,4 @@
-name: IPA (RYD diagnostic, selectable tweaks)
+name: IPA (RYD on-device diagnostics, selectable tweaks)
 
 on:
   workflow_dispatch:
@@ -13,7 +13,7 @@ on:
         type: boolean
         default: true
       ryd_diagnostics:
-        description: Add privacy-safe RYD on-device diagnostic logs (default ON)
+        description: Show in-app RYD diagnostics screen and log status (default ON)
         type: boolean
         default: true
       add_ytuhd:
@@ -241,6 +241,83 @@ jobs:
               'general video callback')
           api.write_text(a)
           tweak.write_text(t)
+          # Keep private values (video IDs, user IDs, URLs, responses) out of diagnostics.
+          # NSUserDefaults is read by the diagnostic entry in the RYD settings screen.
+          def append_marker(text, old, replacement, label):
+              if text.count(old) != 1:
+                  sys.exit(f'RYD on-device diagnostics: upstream mismatch ({label})')
+              return text.replace(old, replacement, 1)
+          a = append_marker(a,
+              'NSLog(@"[RYD-DIAG] API HTTP status=%lu networkError=%d", (unsigned long)responseCode, error != nil);',
+              'NSLog(@"[RYD-DIAG] API HTTP status=%lu networkError=%d", (unsigned long)responseCode, error != nil);'
+              '\n    [[NSUserDefaults standardUserDefaults] setObject:[NSString stringWithFormat:@"HTTP %lu, networkError=%d", (unsigned long)responseCode, error != nil] forKey:@"RYDDiagHTTP"];',
+              'api http marker')
+          a = append_marker(a,
+              'NSLog(@"[RYD-DIAG] API JSON parsed successfully");',
+              'NSLog(@"[RYD-DIAG] API JSON parsed successfully");'
+              '\n        [[NSUserDefaults standardUserDefaults] setObject:@"JSON parsed OK" forKey:@"RYDDiagJSON"];',
+              'api data marker')
+          t = append_marker(t,
+              'NSLog(@"[RYD-DIAG] Shorts like/dislike hook invoked");',
+              'NSLog(@"[RYD-DIAG] Shorts like/dislike hook invoked");'
+              '\n    [[NSUserDefaults standardUserDefaults] setObject:@"Shorts hook called" forKey:@"RYDDiagShorts"];',
+              'shorts marker')
+          t = append_marker(t,
+              'NSLog(@"[RYD-DIAG] Requesting vote data from UI hook");',
+              'NSLog(@"[RYD-DIAG] Requesting vote data from UI hook");'
+              '\n    [[NSUserDefaults standardUserDefaults] setObject:@"Video UI requested votes" forKey:@"RYDDiagVideo"];',
+              'video marker')
+          t = append_marker(t,
+              'NSLog(@"[RYD-DIAG] UI vote callback hasData=%d hasError=%d", data != nil, error != nil);',
+              'NSLog(@"[RYD-DIAG] UI vote callback hasData=%d hasError=%d", data != nil, error != nil);'
+              '\n        [[NSUserDefaults standardUserDefaults] setObject:[NSString stringWithFormat:@"hasData=%d, hasError=%d", data != nil, error != nil] forKey:@"RYDDiagCallback"];',
+              'callback marker')
+          settings = root / 'Settings.x'
+          if not settings.is_file():
+              sys.exit('RYD on-device diagnostics: Settings.x missing')
+          contents = settings.read_text()
+          anchor = '    [sectionItems addObject:rawData];'
+          if contents.count(anchor) != 1:
+              sys.exit('RYD on-device diagnostics: settings anchor not found')
+          diagnostic_item = r'''
+          // This is intentionally a tappable switch-shaped action: it remains OFF.
+          // No additional navigation hooks are needed and the existing RYD settings remain intact.
+          YTSettingsSectionItem *diagItem = [%c(YTSettingsSectionItem) switchItemWithTitle:@"RYD 진단 보기 (탭)"
+              titleDescription:@"API 및 화면 호출 기록 보기 / Mac 불필요"
+              accessibilityIdentifier:nil
+              switchOn:NO
+              switchBlock:^BOOL (YTSettingsCell *cell, BOOL newValue) {
+                  NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+                  NSArray<NSString *> *keys = @[@"RYDDiagHTTP", @"RYDDiagJSON", @"RYDDiagVideo", @"RYDDiagCallback", @"RYDDiagShorts"];
+                  NSArray<NSString *> *titles = @[@"API HTTP", @"API JSON", @"일반 동영상 훅", @"동영상 콜백", @"Shorts 훅"];
+                  NSMutableArray<NSString *> *lines = [NSMutableArray array];
+                  for (NSUInteger i = 0; i < keys.count; i++) {
+                      NSString *value = [d stringForKey:keys[i]];
+                      [lines addObject:[NSString stringWithFormat:@"%@: %@", titles[i], value ?: @"기록 없음"]];
+                  }
+                  NSString *details = [lines componentsJoinedByString:@"\n"];
+                  UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"RYD Diagnostics"
+                      message:details preferredStyle:UIAlertControllerStyleAlert];
+                  [alert addAction:[UIAlertAction actionWithTitle:@"복사" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+                      [UIPasteboard generalPasteboard].string = details;
+                  }]];
+                  [alert addAction:[UIAlertAction actionWithTitle:@"기록 초기화" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *action) {
+                      for (NSString *key in keys) [d removeObjectForKey:key];
+                  }]];
+                  [alert addAction:[UIAlertAction actionWithTitle:@"닫기" style:UIAlertActionStyleCancel handler:nil]];
+                  dispatch_async(dispatch_get_main_queue(), ^{
+                      [delegate presentViewController:alert animated:YES completion:nil];
+                  });
+                  return NO;
+              }
+              settingItemId:0];
+          [sectionItems addObject:diagItem];'''
+          contents = contents.replace(anchor, anchor + '\n' + diagnostic_item, 1)
+          contents = '#import <UIKit/UIKit.h>\n' + contents
+          settings.write_text(contents)
+          api.write_text(a)
+          tweak.write_text(t)
+          print('RYD in-app diagnostics screen enabled: Settings > Return YouTube Dislike > RYD 진단 보기 (탭)')
           print('RYD privacy-safe diagnostics enabled: API status, callback, shorts hook, video hook')
           PY_RYD_DIAGNOSTIC
             fi
@@ -573,7 +650,7 @@ jobs:
           echo '### Requested tweak options' >> "$GITHUB_STEP_SUMMARY"
           if [[ -s requested-tweaks.txt ]]; then cat requested-tweaks.txt >> "$GITHUB_STEP_SUMMARY"; else echo 'None' >> "$GITHUB_STEP_SUMMARY"; fi
           echo '**RYD:** Executable-based substrate filter applied when requested; if the dislike count still does not appear, test RYD alone because current YouTube UI layouts and other tweaks may conflict.' >> "$GITHUB_STEP_SUMMARY"
-          echo '**RYD diagnostics:** If enabled, connect the iPhone to a Mac, open Console, select the device, filter for RYD-DIAG, then open a standard video and a Short. Logs are emitted only when code paths execute; absence is itself diagnostic.' >> "$GITHUB_STEP_SUMMARY"
+          echo '**RYD diagnostics:** On iPhone open YouTube > Settings > Return YouTube Dislike > RYD 진단 보기 (탭). Watch a regular video and Short first, then tap the entry and copy the results. A Mac is NOT required. If the setting entry is absent or the build failed, check the build summary.' >> "$GITHUB_STEP_SUMMARY"
           echo '**Note:** CI API testing cannot prove iPhone connectivity, runtime hook invocation, or dislike display.' >> "$GITHUB_STEP_SUMMARY"
           if [[ "$integration" == fallback* ]]; then
             echo '::warning::Requested tweaks were not included. Final IPA is marked FALLBACK in its filename.'
