@@ -1,4 +1,4 @@
-name: IPA (RYD on-device diagnostics, selectable tweaks)
+name: IPA (RYD on-device diagnostics v2, selectable tweaks)
 
 on:
   workflow_dispatch:
@@ -288,8 +288,8 @@ jobs:
               switchOn:NO
               switchBlock:^BOOL (YTSettingsCell *cell, BOOL newValue) {
                   NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
-                  NSArray<NSString *> *keys = @[@"RYDDiagHTTP", @"RYDDiagJSON", @"RYDDiagVideo", @"RYDDiagCallback", @"RYDDiagShorts"];
-                  NSArray<NSString *> *titles = @[@"API HTTP", @"API JSON", @"일반 동영상 훅", @"동영상 콜백", @"Shorts 훅"];
+                  NSArray<NSString *> *keys = @[@"RYDDiagLoaded", @"RYDDiagManual", @"RYDDiagHTTP", @"RYDDiagJSON", @"RYDDiagVideo", @"RYDDiagCallback", @"RYDDiagShorts"];
+                  NSArray<NSString *> *titles = @[@"RYD 모듈 로드", @"아이폰 직접 API 검사", @"RYD API HTTP", @"RYD API JSON", @"일반 동영상 훅", @"동영상 콜백", @"Shorts 훅"];
                   NSMutableArray<NSString *> *lines = [NSMutableArray array];
                   for (NSUInteger i = 0; i < keys.count; i++) {
                       NSString *value = [d stringForKey:keys[i]];
@@ -302,7 +302,9 @@ jobs:
                       [UIPasteboard generalPasteboard].string = details;
                   }]];
                   [alert addAction:[UIAlertAction actionWithTitle:@"기록 초기화" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *action) {
-                      for (NSString *key in keys) [d removeObjectForKey:key];
+                      for (NSString *key in keys) {
+                      if (![key isEqualToString:@"RYDDiagLoaded"]) [d removeObjectForKey:key];
+                  }
                   }]];
                   [alert addAction:[UIAlertAction actionWithTitle:@"닫기" style:UIAlertActionStyleCancel handler:nil]];
                   dispatch_async(dispatch_get_main_queue(), ^{
@@ -311,13 +313,53 @@ jobs:
                   return NO;
               }
               settingItemId:0];
-          [sectionItems addObject:diagItem];'''
+          [sectionItems addObject:diagItem];
+          // Explicit on-device network probe. Uses a public demo video ID; never the user's video ID.
+          // This tests iPhone connectivity, independently of YouTube's UI hooks.
+          YTSettingsSectionItem *apiTestItem = [%c(YTSettingsSectionItem) switchItemWithTitle:@"RYD API 직접 검사 (탭)"
+              titleDescription:@"아이폰에서 직접 서버 연결 테스트 (공개 테스트 영상 사용)"
+              accessibilityIdentifier:nil
+              switchOn:NO
+              switchBlock:^BOOL (YTSettingsCell *cell, BOOL newValue) {
+                  NSUserDefaults *prefs = [NSUserDefaults standardUserDefaults];
+                  [prefs setObject:@"검사 진행 중" forKey:@"RYDDiagManual"];
+                  NSURL *testURL = [NSURL URLWithString:@"https://returnyoutubedislikeapi.com/votes?videoId=dQw4w9WgXcQ"];
+                  NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithURL:testURL
+                      completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+                          NSInteger status = [(NSHTTPURLResponse *)response statusCode];
+                          BOOL hasDislikes = NO;
+                          if (data.length) {
+                              NSDictionary *parsed = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+                              hasDislikes = [parsed isKindOfClass:[NSDictionary class]] && parsed[@"dislikes"] != nil;
+                          }
+                          NSString *value = [NSString stringWithFormat:@"HTTP %ld / dislikes 필드 %@ / 네트워크 오류 %@",
+                              (long)status, hasDislikes ? @"있음" : @"없음", error ? @"있음" : @"없음"];
+                          [prefs setObject:value forKey:@"RYDDiagManual"];
+                          dispatch_async(dispatch_get_main_queue(), ^{
+                              UIAlertController *result = [UIAlertController alertControllerWithTitle:@"RYD API 검사 결과"
+                                  message:value preferredStyle:UIAlertControllerStyleAlert];
+                              [result addAction:[UIAlertAction actionWithTitle:@"확인" style:UIAlertActionStyleDefault handler:nil]];
+                              [delegate presentViewController:result animated:YES completion:nil];
+                          });
+                      }];
+                  [task resume];
+                  return NO;
+              }
+              settingItemId:0];
+          [sectionItems addObject:apiTestItem];'''
           contents = contents.replace(anchor, anchor + '\n' + diagnostic_item, 1)
           contents = '#import <UIKit/UIKit.h>\n' + contents
+          # Constructor runs when RYD's dylib is loaded, before screen-specific hooks.
+          # Keep this diagnostic in the same binary as the RYD settings extension.
+          contents += r'''
+          __attribute__((constructor)) static void RYDOnDeviceDiagnosticLoaded(void) {
+              [[NSUserDefaults standardUserDefaults] setObject:@"로드됨" forKey:@"RYDDiagLoaded"];
+          }
+          '''
           settings.write_text(contents)
           api.write_text(a)
           tweak.write_text(t)
-          print('RYD in-app diagnostics screen enabled: Settings > Return YouTube Dislike > RYD 진단 보기 (탭)')
+          print('RYD in-app diagnostics v2 enabled: Settings > Return YouTube Dislike > RYD 진단 보기 / RYD API 직접 검사')
           print('RYD privacy-safe diagnostics enabled: API status, callback, shorts hook, video hook')
           PY_RYD_DIAGNOSTIC
             fi
@@ -650,7 +692,7 @@ jobs:
           echo '### Requested tweak options' >> "$GITHUB_STEP_SUMMARY"
           if [[ -s requested-tweaks.txt ]]; then cat requested-tweaks.txt >> "$GITHUB_STEP_SUMMARY"; else echo 'None' >> "$GITHUB_STEP_SUMMARY"; fi
           echo '**RYD:** Executable-based substrate filter applied when requested; if the dislike count still does not appear, test RYD alone because current YouTube UI layouts and other tweaks may conflict.' >> "$GITHUB_STEP_SUMMARY"
-          echo '**RYD diagnostics:** On iPhone open YouTube > Settings > Return YouTube Dislike > RYD 진단 보기 (탭). Watch a regular video and Short first, then tap the entry and copy the results. A Mac is NOT required. If the setting entry is absent or the build failed, check the build summary.' >> "$GITHUB_STEP_SUMMARY"
+          echo '**RYD diagnostics:** On iPhone open YouTube > Settings > Return YouTube Dislike > RYD 진단 보기 (탭). Run RYD API 직접 검사 on the iPhone, then watch a video and Short; open RYD 진단 보기 and copy the results. A Mac is NOT required. If the setting entry is absent or the build failed, check the build summary.' >> "$GITHUB_STEP_SUMMARY"
           echo '**Note:** CI API testing cannot prove iPhone connectivity, runtime hook invocation, or dislike display.' >> "$GITHUB_STEP_SUMMARY"
           if [[ "$integration" == fallback* ]]; then
             echo '::warning::Requested tweaks were not included. Final IPA is marked FALLBACK in its filename.'
