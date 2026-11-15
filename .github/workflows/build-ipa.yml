@@ -1,4 +1,4 @@
-name: IPA (RYD identifier audit v7, selectable tweaks)
+name: IPA (RYD identifier audit v7.1, required RYD verified)
 
 on:
   workflow_dispatch:
@@ -822,6 +822,20 @@ jobs:
           echo 'Skipped optional tweaks:'
           cat selected-failed.txt
 
+      - name: Require selected RYD build artifact
+        if: ${{ inputs.add_ryd }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! -s extra-debs/ryd.deb ]]; then
+            echo '::error::RYD was selected but its DEB was not built. Refusing to publish a YTKACE-only IPA.'
+            echo '### RYD BUILD FAILED — IPA publishing blocked' >> "$GITHUB_STEP_SUMMARY"
+            if [[ -f selected-failed.txt ]]; then cat selected-failed.txt >> "$GITHUB_STEP_SUMMARY"; fi
+            exit 1
+          fi
+          dpkg-deb --info extra-debs/ryd.deb >/dev/null
+          echo 'RYD DEB present and readable.'
+
       - name: RYD public API preflight (CI network only)
         if: ${{ inputs.add_ryd && inputs.ryd_diagnostics }}
         shell: bash
@@ -865,6 +879,8 @@ jobs:
       - name: Package YTKACE and selected tweak DEBs in one pass
         id: inject
         shell: bash
+        env:
+          REQUIRE_RYD: ${{ inputs.add_ryd }}
         run: |
           set -euo pipefail
           ytkace=built-ytkace/YTKACE.dylib
@@ -889,6 +905,10 @@ jobs:
           shopt -s nullglob
           optional_debs=(extra-debs/*.deb)
           built_debs=(built-deb/*.deb)
+          if [[ "$REQUIRE_RYD" == true && ! -s extra-debs/ryd.deb ]]; then
+            echo '::error::Selected RYD missing before IPA integration.'
+            exit 1
+          fi
           # Construct cyan inputs from the YTKACE DEB and successful optional DEBs.
           if (( ${#built_debs[@]} != 1 )); then
             echo "ERROR: expected exactly one YTKACE DEB; got ${#built_debs[@]}" >&2
@@ -1007,12 +1027,24 @@ jobs:
               mv -f "$output" "$final_output"
             fi
           fi
-          # The baseline must be kept intact whenever the optional integration fails.
-          python3 - "$final_output" <<'PY_FINAL_VERIFY'
+          # If RYD was requested, never silently publish a YTKACE-only fallback.
+          if [[ "$REQUIRE_RYD" == true && "$integration" != cyan-success && "$integration" != cyan-partial ]]; then
+            echo "::error::RYD was requested but integration=$integration. IPA publishing blocked."
+            exit 1
+          fi
+          python3 - "$final_output" "$REQUIRE_RYD" <<'PY_FINAL_VERIFY'
           import sys, zipfile
-          with zipfile.ZipFile(sys.argv[1]) as z:
+          ipa, require_ryd = sys.argv[1:]
+          with zipfile.ZipFile(ipa) as z:
               assert z.testzip() is None
               assert any(n.startswith('Payload/') and n.endswith('.app/Info.plist') for n in z.namelist())
+              libs = [name for name in z.namelist() if name.endswith('.dylib')]
+              if require_ryd == 'true':
+                  matches = [name for name in libs if name.split('/')[-1] == 'YouTubeDislikesReturn.dylib'
+                             and name.startswith('Payload/') and '.app/' in name]
+                  assert len(matches) == 1, f'REQUIRED RYD DYLIB NOT FOUND IN FINAL IPA: {matches}'
+                  assert len(z.read(matches[0])) > 32, 'RYD dylib is empty'
+                  print(f'PASS: RYD present in final IPA: {matches[0]}')
           PY_FINAL_VERIFY
           rm -f baseline-ytkace.ipa
           echo "ipa=$final_output" >> "$GITHUB_OUTPUT"
@@ -1035,7 +1067,7 @@ jobs:
           echo '### Requested tweak options' >> "$GITHUB_STEP_SUMMARY"
           if [[ -s requested-tweaks.txt ]]; then cat requested-tweaks.txt >> "$GITHUB_STEP_SUMMARY"; else echo 'None' >> "$GITHUB_STEP_SUMMARY"; fi
           echo '**RYD:** Executable-based substrate filter applied when requested; if the dislike count still does not appear, test RYD alone because current YouTube UI layouts and other tweaks may conflict.' >> "$GITHUB_STEP_SUMMARY"
-          echo '**RYD diagnostics v5:** On iPhone open YouTube > Settings > Return YouTube Dislike > RYD 진단 보기 (탭). Run RYD API 직접 검사 on the iPhone, then watch a video and Short; open RYD 진단 보기 and copy the results. A Mac is NOT required. If the setting entry is absent or the build failed, check the build summary.' >> "$GITHUB_STEP_SUMMARY"
+          echo '**RYD diagnostics v7:** On iPhone open YouTube > Settings > Return YouTube Dislike > RYD 진단 보기 (탭). Run RYD API 직접 검사 on the iPhone, then watch a video and Short; open RYD 진단 보기 and copy the results. A Mac is NOT required. If the setting entry is absent or the build failed, check the build summary.' >> "$GITHUB_STEP_SUMMARY"
           echo '**Note:** CI API testing cannot prove iPhone connectivity, runtime hook invocation, or dislike display.' >> "$GITHUB_STEP_SUMMARY"
           if [[ "$integration" == fallback* ]]; then
             echo '::warning::Requested tweaks were not included. Final IPA is marked FALLBACK in its filename.'
