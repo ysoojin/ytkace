@@ -9,9 +9,9 @@ on:
         type: string
         default: 'https://www.dropbox.com/scl/fi/odyv50o9pgx7fh8nr8u5h/com.google.ios.youtube-21.45.4-Decrypted.ipa?rlkey=q8sq80ak1t8qr0pwe1t8f448e&st=tqx7k2kt&dl=1'
       add_ryd:
-        description: RYD optional IPA injection (default OFF)
+        description: Return YouTube Dislike (sideload compatible filter; default ON)
         type: boolean
-        default: false
+        default: true
       add_ytuhd:
         description: YTUHD (default OFF)
         type: boolean
@@ -29,7 +29,7 @@ on:
         type: boolean
         default: false
       add_youmute:
-        description: YouMute quick mute button (default OFF)
+        description: YouMute + required YTVideoOverlay (default OFF)
         type: boolean
         default: false
       add_yougroupsettings:
@@ -177,6 +177,27 @@ jobs:
               echo '::endgroup::'
               return 0
             fi
+            # RYD upstream filters only the stock bundle ID. Sideload signing
+            # may change CFBundleIdentifier, preventing Substrate from loading
+            # an otherwise correctly injected dylib. Match the executable
+            # instead, which remains "YouTube" for this IPA build.
+            if [[ "$key" == ryd ]]; then
+              python3 - "$out" <<'PY_RYD_FILTER'
+          from pathlib import Path
+          import plistlib, sys
+          root = Path(sys.argv[1])
+          p = root / 'YouTubeDislikesReturn.plist'
+          if not p.is_file():
+              sys.exit('RYD filter plist missing: ' + str(p))
+          # The upstream file uses OpenStep syntax; write a standard XML plist
+          # understood by Substrate/Cyan. Only change the loader filter.
+          original = p.read_text()
+          if 'com.google.ios.youtube' not in original or 'Filter' not in original:
+              sys.exit('Unexpected RYD filter contents; refusing blind patch')
+          p.write_bytes(plistlib.dumps({'Filter': {'Executables': ['YouTube']}}, fmt=plistlib.FMT_XML))
+          print('RYD sideload filter: Executables = YouTube (bundle-ID independent)')
+          PY_RYD_FILTER
+            fi
             if [[ "$key" == donteatmycontent ]]; then
               python3 - "$out" <<'PY_PATCH'
           from pathlib import Path
@@ -245,7 +266,24 @@ jobs:
           build_one ytabconfig PoomSmart/YTABConfig "$ADD_YTABCONFIG"
           build_one ytsilentvote PoomSmart/YTSilentVote "$ADD_YTSILENTVOTE"
           build_one donteatmycontent therealFoxster/DontEatMyContent "$ADD_DONTEATMYCONTENT"
-          build_one youmute PoomSmart/YouMute "$ADD_YOUMUTE"
+          # YouMute includes ../YTVideoOverlay/Header.h and ../YTVideoOverlay/Init.x.
+          # Build the helper first from a sibling checkout, and ship both DEBs.
+          # A failed helper build must NOT leave a standalone unusable YouMute.
+          if [[ "$ADD_YOUMUTE" == true ]]; then
+            build_one ytvideooverlay PoomSmart/YTVideoOverlay true
+            if [[ -s extra-debs/ytvideooverlay.deb ]] && [[ -f sources/ytvideooverlay/Header.h ]] && [[ -f sources/ytvideooverlay/Init.x ]]; then
+              # The upstream relative includes require the literal sibling name.
+              ln -sfn ytvideooverlay sources/YTVideoOverlay
+              build_one youmute PoomSmart/YouMute true
+            else
+              echo 'FAILED youmute: required YTVideoOverlay helper could not be built' | tee -a selected-failed.txt
+            fi
+            # Treat these two packages as a pair; never inject just one.
+            if [[ ! -s extra-debs/ytvideooverlay.deb || ! -s extra-debs/youmute.deb ]]; then
+              rm -f extra-debs/ytvideooverlay.deb extra-debs/youmute.deb
+              echo 'FAILED youmute-pair: helper or main tweak missing; excluded both DEBs' | tee -a selected-failed.txt
+            fi
+          fi
           build_one yougroupsettings PoomSmart/YouGroupSettings "$ADD_YOUGROUPSETTINGS"
           echo 'Successfully built optional DEB packages:'
           find extra-debs -maxdepth 1 -type f -name '*.deb' -print | sort
@@ -382,6 +420,9 @@ jobs:
                                      path.endswith('/' + suffix) for path in present):
                               missing_runtime.append((binary.name, dep))
                   assert not missing_runtime, 'Unresolved packaged @rpath dependencies: ' + repr(missing_runtime)
+          if any(Path(d).name == 'ryd.deb' for d in debs):
+              assert 'YouTubeDislikesReturn.dylib' in by_name, 'RYD dylib missing'
+              print('RYD dylib present in IPA; on-device initialization and UI hooks still need testing')
           print('Verified integrated Mach-O libraries:', ', '.join(sorted(expected)))
           PY_CYAN
             then
@@ -439,6 +480,7 @@ jobs:
           if [[ -s selected-failed.txt ]]; then cat selected-failed.txt >> "$GITHUB_STEP_SUMMARY"; else echo 'None' >> "$GITHUB_STEP_SUMMARY"; fi
           echo '### Requested tweak options' >> "$GITHUB_STEP_SUMMARY"
           if [[ -s requested-tweaks.txt ]]; then cat requested-tweaks.txt >> "$GITHUB_STEP_SUMMARY"; else echo 'None' >> "$GITHUB_STEP_SUMMARY"; fi
+          echo '**RYD:** Executable-based substrate filter applied when requested; if the dislike count still does not appear, test RYD alone because current YouTube UI layouts and other tweaks may conflict.' >> "$GITHUB_STEP_SUMMARY"
           echo '**Note:** Device launch and tweak functionality are not proven by static checks.' >> "$GITHUB_STEP_SUMMARY"
           if [[ "$integration" == fallback* ]]; then
             echo '::warning::Requested tweaks were not included. Final IPA is marked FALLBACK in its filename.'
