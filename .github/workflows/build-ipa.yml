@@ -1,4 +1,4 @@
-name: IPA (RYD button topology audit v6, selectable tweaks)
+name: IPA (RYD identifier audit v7, selectable tweaks)
 
 on:
   workflow_dispatch:
@@ -351,6 +351,50 @@ jobs:
               }
           '''
           t = replace_once(t, v6_entry, v6_entry + v6_code, 'v6 collection telemetry entry')
+          # v7 runs independently from v6's 400-call limit. Only publish
+          # strictly static-looking id.video.* identifiers, never arbitrary
+          # accessibility labels, video IDs, titles, or account information.
+          v7_code = r'''
+              static NSUInteger rydV7Observed = 0;
+              if (rydV7Observed < 1500) {
+                  @synchronized([NSUserDefaults standardUserDefaults]) {
+                      rydV7Observed++;
+                      NSString *raw = self.accessibilityIdentifier;
+                      if ([raw isKindOfClass:[NSString class]] && [raw containsString:@"video"] &&
+                          ![raw isEqualToString:@"id.video.scrollable_action_bar"] &&
+                          ![raw isEqualToString:@"id.video.non_scrollable_action_bar"] &&
+                          ![raw containsString:@"action_bar"]) {
+                          NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+                          [d setInteger:[d integerForKey:@"RYDV7OtherVideoSeen"] + 1 forKey:@"RYDV7OtherVideoSeen"];
+                          BOOL approved = [raw hasPrefix:@"id.video."] && raw.length <= 96;
+                          if (approved) {
+                              NSCharacterSet *bad = [[NSCharacterSet characterSetWithCharactersInString:
+                                  @"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-"] invertedSet];
+                              approved = [raw rangeOfCharacterFromSet:bad].location == NSNotFound;
+                              NSArray *parts = [raw componentsSeparatedByString:@"."];
+                              approved = approved && parts.count >= 3 && parts.count <= 6;
+                              for (NSString *part in parts) if (part.length > 32 || part.length == 0) approved = NO;
+                          }
+                          if (approved) {
+                              NSMutableArray *stored = [[d arrayForKey:@"RYDV7IdentifierList"] mutableCopy];
+                              if (!stored) stored = [NSMutableArray array];
+                              if (![stored containsObject:raw] && stored.count < 12) {
+                                  [stored addObject:raw];
+                                  [d setObject:stored forKey:@"RYDV7IdentifierList"];
+                              }
+                              NSString *shape = [NSString stringWithFormat:@"node=%@, children=%lu",
+                                  node ? @"yes" : @"no", (unsigned long)[node.yogaChildren count]];
+                              [d setObject:shape forKey:[@"RYDV7Shape_" stringByAppendingString:raw]];
+                          } else {
+                              [d setInteger:[d integerForKey:@"RYDV7Redacted"] + 1 forKey:@"RYDV7Redacted"];
+                          }
+                      }
+                      [d setInteger:rydV7Observed forKey:@"RYDV7TotalSeen"];
+                  }
+              }
+          '''
+          t = replace_once(t, v6_entry + v6_code, v6_entry + v6_code + v7_code,
+              'v7 scoped identifier collection')
           settings = root / 'Settings.x'
           if not settings.is_file():
               sys.exit('RYD on-device diagnostics: Settings.x missing')
@@ -608,7 +652,44 @@ jobs:
               settingItemId:0];
           [sectionItems addObject:v6Item];
           '''
-          contents = contents.replace(anchor, anchor + '\n' + diagnostic_item + '\n' + compatibility_item + '\n' + action_path_item + '\n' + v6_item, 1)
+          v7_item = r'''
+          YTSettingsSectionItem *v7Item = [%c(YTSettingsSectionItem) switchItemWithTitle:@"RYD 식별자 검사 v7 (탭)"
+              titleDescription:@"id.video.* 형식의 버튼 후보만 수집하며 개인정보는 제외"
+              accessibilityIdentifier:nil
+              switchOn:NO
+              switchBlock:^BOOL (YTSettingsCell *cell, BOOL newValue) {
+                  NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+                  NSArray<NSString *> *names = [d arrayForKey:@"RYDV7IdentifierList"] ?: @[];
+                  NSMutableArray<NSString *> *lines = [NSMutableArray arrayWithArray:@[
+                      @"RYD v7 | scoped identifier audit",
+                      [NSString stringWithFormat:@"관찰 호출: %ld / 1500", (long)[d integerForKey:@"RYDV7TotalSeen"]],
+                      [NSString stringWithFormat:@"기타 video 분류: %ld", (long)[d integerForKey:@"RYDV7OtherVideoSeen"]],
+                      [NSString stringWithFormat:@"비공개 처리: %ld", (long)[d integerForKey:@"RYDV7Redacted"]]
+                  ]];
+                  if (names.count == 0) [lines addObject:@"공개 가능한 id.video.* 식별자 없음"];
+                  for (NSString *name in names) {
+                      NSString *shape = [d stringForKey:[@"RYDV7Shape_" stringByAppendingString:name]] ?: @"";
+                      [lines addObject:[NSString stringWithFormat:@"%@: %@", name, shape]];
+                  }
+                  NSString *result = [lines componentsJoinedByString:@"\n"];
+                  UIAlertController *dialog = [UIAlertController alertControllerWithTitle:@"RYD 식별자 검사 v7"
+                      message:result preferredStyle:UIAlertControllerStyleAlert];
+                  [dialog addAction:[UIAlertAction actionWithTitle:@"복사" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+                      [UIPasteboard generalPasteboard].string = result;
+                  }]];
+                  [dialog addAction:[UIAlertAction actionWithTitle:@"초기화" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *action) {
+                      for (NSString *name in names) [d removeObjectForKey:[@"RYDV7Shape_" stringByAppendingString:name]];
+                      for (NSString *k in @[@"RYDV7IdentifierList", @"RYDV7TotalSeen", @"RYDV7OtherVideoSeen", @"RYDV7Redacted"])
+                          [d removeObjectForKey:k];
+                  }]];
+                  [dialog addAction:[UIAlertAction actionWithTitle:@"닫기" style:UIAlertActionStyleCancel handler:nil]];
+                  dispatch_async(dispatch_get_main_queue(), ^{ [delegate presentViewController:dialog animated:YES completion:nil]; });
+                  return NO;
+              }
+              settingItemId:0];
+          [sectionItems addObject:v7Item];
+          '''
+          contents = contents.replace(anchor, anchor + '\n' + diagnostic_item + '\n' + compatibility_item + '\n' + action_path_item + '\n' + v6_item + '\n' + v7_item, 1)
 
           contents = '#import <objc/runtime.h>\n#import <UIKit/UIKit.h>\n' + contents
           # Constructor runs when RYD's dylib is loaded, before screen-specific hooks.
@@ -621,7 +702,7 @@ jobs:
           settings.write_text(contents)
           api.write_text(a)
           tweak.write_text(t)
-          print('RYD in-app diagnostics v6 with button topology audit enabled: Settings > Return YouTube Dislike > RYD 진단 보기 / RYD API 직접 검사')
+          print('RYD in-app diagnostics v7 with scoped identifier audit enabled: Settings > Return YouTube Dislike > RYD 진단 보기 / RYD API 직접 검사')
           print('RYD privacy-safe diagnostics enabled: API status, callback, shorts hook, video hook')
           PY_RYD_DIAGNOSTIC
             fi
