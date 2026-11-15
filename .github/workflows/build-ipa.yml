@@ -347,8 +347,55 @@ jobs:
               }
               settingItemId:0];
           [sectionItems addObject:apiTestItem];'''
-          contents = contents.replace(anchor, anchor + '\n' + diagnostic_item, 1)
-          contents = '#import <UIKit/UIKit.h>\n' + contents
+          # On-device Objective-C runtime audit: check upstream RYD hook targets
+          # without calling private methods or accessing any account/video data.
+          compatibility_item = r'''
+          YTSettingsSectionItem *hookAuditItem = [%c(YTSettingsSectionItem) switchItemWithTitle:@"RYD 훅 호환성 검사 (탭)"
+              titleDescription:@"현재 YouTube에서 RYD 클래스와 메서드 존재 여부 확인"
+              accessibilityIdentifier:nil
+              switchOn:NO
+              switchBlock:^BOOL (YTSettingsCell *cell, BOOL newValue) {
+                  NSArray<NSArray<NSString *> *> *targets = @[
+                      @[@"YTReelWatchLikesController", @"updateLikeButtonWithRenderer:"],
+                      @[@"ASCollectionView", @"nodeForItemAtIndexPath:"],
+                      @[@"YTReelWatchPlaybackOverlayView", @"layoutActionBar"],
+                      @[@"YTReelWatchPlaybackOverlayViewSub", @"layoutActionBar"],
+                      @[@"YTAsyncCollectionView", @"pageStyleDidChange:"],
+                      @[@"YTRollingNumberNode", @"updateRollingNumberView"],
+                      @[@"ELMNodeFactory", @"classForElement:materializationContext:"]
+                  ];
+                  NSMutableArray<NSString *> *results = [NSMutableArray array];
+                  NSUInteger present = 0;
+                  for (NSArray<NSString *> *pair in targets) {
+                      NSString *className = pair[0], *selectorName = pair[1];
+                      Class klass = NSClassFromString(className);
+                      BOOL exists = klass != Nil;
+                      BOOL methodExists = exists && class_getInstanceMethod(klass, NSSelectorFromString(selectorName)) != NULL;
+                      if (methodExists) present++;
+                      [results addObject:[NSString stringWithFormat:@"%@: %@", className,
+                          !exists ? @"클래스 없음" : (methodExists ? @"메서드 있음" : @"메서드 없음")]];
+                  }
+                  NSString *details = [NSString stringWithFormat:@"검사 항목 %lu / %lu\n\n%@\n\n존재 여부는 훅 호출이나 기능 성공을 보장하지 않습니다.",
+                      (unsigned long)present, (unsigned long)targets.count,
+                      [results componentsJoinedByString:@"\n"]];
+                  [[NSUserDefaults standardUserDefaults] setObject:details forKey:@"RYDDiagHookAudit"];
+                  UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"RYD 훅 호환성 검사"
+                      message:details preferredStyle:UIAlertControllerStyleAlert];
+                  [alert addAction:[UIAlertAction actionWithTitle:@"복사" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+                      [UIPasteboard generalPasteboard].string = details;
+                  }]];
+                  [alert addAction:[UIAlertAction actionWithTitle:@"닫기" style:UIAlertActionStyleCancel handler:nil]];
+                  dispatch_async(dispatch_get_main_queue(), ^{
+                      [delegate presentViewController:alert animated:YES completion:nil];
+                  });
+                  return NO;
+              }
+              settingItemId:0];
+          [sectionItems addObject:hookAuditItem];
+          '''
+          contents = contents.replace(anchor, anchor + '\n' + diagnostic_item + '\n' + compatibility_item, 1)
+
+          contents = '#import <objc/runtime.h>\n#import <UIKit/UIKit.h>\n' + contents
           # Constructor runs when RYD's dylib is loaded, before screen-specific hooks.
           # Keep this diagnostic in the same binary as the RYD settings extension.
           contents += r'''
@@ -359,7 +406,7 @@ jobs:
           settings.write_text(contents)
           api.write_text(a)
           tweak.write_text(t)
-          print('RYD in-app diagnostics v2 enabled: Settings > Return YouTube Dislike > RYD 진단 보기 / RYD API 직접 검사')
+          print('RYD in-app diagnostics v3 with runtime hook audit enabled: Settings > Return YouTube Dislike > RYD 진단 보기 / RYD API 직접 검사')
           print('RYD privacy-safe diagnostics enabled: API status, callback, shorts hook, video hook')
           PY_RYD_DIAGNOSTIC
             fi
@@ -692,7 +739,7 @@ jobs:
           echo '### Requested tweak options' >> "$GITHUB_STEP_SUMMARY"
           if [[ -s requested-tweaks.txt ]]; then cat requested-tweaks.txt >> "$GITHUB_STEP_SUMMARY"; else echo 'None' >> "$GITHUB_STEP_SUMMARY"; fi
           echo '**RYD:** Executable-based substrate filter applied when requested; if the dislike count still does not appear, test RYD alone because current YouTube UI layouts and other tweaks may conflict.' >> "$GITHUB_STEP_SUMMARY"
-          echo '**RYD diagnostics:** On iPhone open YouTube > Settings > Return YouTube Dislike > RYD 진단 보기 (탭). Run RYD API 직접 검사 on the iPhone, then watch a video and Short; open RYD 진단 보기 and copy the results. A Mac is NOT required. If the setting entry is absent or the build failed, check the build summary.' >> "$GITHUB_STEP_SUMMARY"
+          echo '**RYD diagnostics v3:** On iPhone open YouTube > Settings > Return YouTube Dislike > RYD 진단 보기 (탭). Run RYD API 직접 검사 on the iPhone, then watch a video and Short; open RYD 진단 보기 and copy the results. A Mac is NOT required. If the setting entry is absent or the build failed, check the build summary.' >> "$GITHUB_STEP_SUMMARY"
           echo '**Note:** CI API testing cannot prove iPhone connectivity, runtime hook invocation, or dislike display.' >> "$GITHUB_STEP_SUMMARY"
           if [[ "$integration" == fallback* ]]; then
             echo '::warning::Requested tweaks were not included. Final IPA is marked FALLBACK in its filename.'
