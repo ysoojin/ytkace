@@ -1,4 +1,4 @@
-name: IPA (RYD action-path audit v5, selectable tweaks)
+name: IPA (RYD button topology audit v6, selectable tweaks)
 
 on:
   workflow_dispatch:
@@ -319,6 +319,38 @@ jobs:
               }
           ''', 1)
           t = begin + shorts_anchor + after
+          # v6: capture a bounded, privacy-safe distribution of collection IDs
+          # and ELM node structure without recording raw identifiers or videos.
+          # This occurs before the strict upstream action-bar ID check.
+          v6_entry = 'ELMCellNode *node = %orig;'
+          v6_code = r'''
+              static NSUInteger rydV6Seen = 0;
+              if (rydV6Seen < 400) {
+                  rydV6Seen++;
+                  NSString *tag = self.accessibilityIdentifier;
+                  NSString *bucket = @"other";
+                  if (tag.length == 0) bucket = @"empty";
+                  else if ([tag isEqualToString:@"id.video.scrollable_action_bar"]) bucket = @"old-scrollable";
+                  else if ([tag isEqualToString:@"id.video.non_scrollable_action_bar"]) bucket = @"new-nonscrollable";
+                  else if ([tag containsString:@"action_bar"]) bucket = @"other-actionbar";
+                  else if ([tag containsString:@"video"]) bucket = @"other-video";
+                  NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+                  NSString *key = [@"RYDV6Bucket_" stringByAppendingString:bucket];
+                  [defaults setInteger:([defaults integerForKey:key] + 1) forKey:key];
+                  // Record only the structural shape, not user-visible data.
+                  if ([bucket isEqualToString:@"new-nonscrollable"] ||
+                      [bucket isEqualToString:@"other-actionbar"] ||
+                      [bucket isEqualToString:@"old-scrollable"]) {
+                      NSString *shapeKey = [@"RYDV6Shape_" stringByAppendingString:bucket];
+                      if (![defaults objectForKey:shapeKey]) {
+                          [defaults setObject:[NSString stringWithFormat:@"node=%@ children=%lu",
+                              node ? @"yes" : @"no", (unsigned long)[node.yogaChildren count]] forKey:shapeKey];
+                      }
+                  }
+                  [defaults setInteger:rydV6Seen forKey:@"RYDV6TotalSeen"];
+              }
+          '''
+          t = replace_once(t, v6_entry, v6_entry + v6_code, 'v6 collection telemetry entry')
           settings = root / 'Settings.x'
           if not settings.is_file():
               sys.exit('RYD on-device diagnostics: Settings.x missing')
@@ -538,7 +570,45 @@ jobs:
               settingItemId:0];
           [sectionItems addObject:routeItem];
           '''
-          contents = contents.replace(anchor, anchor + '\n' + diagnostic_item + '\n' + compatibility_item + '\n' + action_path_item, 1)
+          v6_item = r'''
+          YTSettingsSectionItem *v6Item = [%c(YTSettingsSectionItem) switchItemWithTitle:@"RYD 버튼 구조 검사 v6 (탭)"
+              titleDescription:@"일반 동영상의 버튼 식별자 유형 조사"
+              accessibilityIdentifier:nil
+              switchOn:NO
+              switchBlock:^BOOL (YTSettingsCell *cell, BOOL newValue) {
+                  NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+                  NSArray<NSString *> *buckets = @[@"empty", @"old-scrollable", @"new-nonscrollable",
+                      @"other-actionbar", @"other-video", @"other"];
+                  NSMutableArray<NSString *> *lines = [NSMutableArray array];
+                  [lines addObject:@"RYD v6 | button topology (max 400 calls)"];
+                  [lines addObject:[NSString stringWithFormat:@"전체 호출: %ld", (long)[defaults integerForKey:@"RYDV6TotalSeen"]]];
+                  for (NSString *bucket in buckets) {
+                      NSString *key = [@"RYDV6Bucket_" stringByAppendingString:bucket];
+                      NSString *shape = [defaults stringForKey:[@"RYDV6Shape_" stringByAppendingString:bucket]];
+                      [lines addObject:[NSString stringWithFormat:@"%@: %ld%@", bucket,
+                          (long)[defaults integerForKey:key], shape ? [@" (" stringByAppendingFormat:@"%@)", shape] : @""]];
+                  }
+                  NSString *details = [lines componentsJoinedByString:@"\n"];
+                  UIAlertController *panel = [UIAlertController alertControllerWithTitle:@"RYD 버튼 구조 v6"
+                      message:details preferredStyle:UIAlertControllerStyleAlert];
+                  [panel addAction:[UIAlertAction actionWithTitle:@"복사" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+                      [UIPasteboard generalPasteboard].string = details;
+                  }]];
+                  [panel addAction:[UIAlertAction actionWithTitle:@"초기화" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *action) {
+                      for (NSString *bucket in buckets) {
+                          [defaults removeObjectForKey:[@"RYDV6Bucket_" stringByAppendingString:bucket]];
+                          [defaults removeObjectForKey:[@"RYDV6Shape_" stringByAppendingString:bucket]];
+                      }
+                      [defaults removeObjectForKey:@"RYDV6TotalSeen"];
+                  }]];
+                  [panel addAction:[UIAlertAction actionWithTitle:@"닫기" style:UIAlertActionStyleCancel handler:nil]];
+                  dispatch_async(dispatch_get_main_queue(), ^{ [delegate presentViewController:panel animated:YES completion:nil]; });
+                  return NO;
+              }
+              settingItemId:0];
+          [sectionItems addObject:v6Item];
+          '''
+          contents = contents.replace(anchor, anchor + '\n' + diagnostic_item + '\n' + compatibility_item + '\n' + action_path_item + '\n' + v6_item, 1)
 
           contents = '#import <objc/runtime.h>\n#import <UIKit/UIKit.h>\n' + contents
           # Constructor runs when RYD's dylib is loaded, before screen-specific hooks.
@@ -551,7 +621,7 @@ jobs:
           settings.write_text(contents)
           api.write_text(a)
           tweak.write_text(t)
-          print('RYD in-app diagnostics v5 with action route audit enabled: Settings > Return YouTube Dislike > RYD 진단 보기 / RYD API 직접 검사')
+          print('RYD in-app diagnostics v6 with button topology audit enabled: Settings > Return YouTube Dislike > RYD 진단 보기 / RYD API 직접 검사')
           print('RYD privacy-safe diagnostics enabled: API status, callback, shorts hook, video hook')
           PY_RYD_DIAGNOSTIC
             fi
