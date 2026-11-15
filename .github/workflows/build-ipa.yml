@@ -1,4 +1,4 @@
-name: IPA (YTKACE + expanded selectable tweaks, shared sideload IPA)
+name: IPA (RYD diagnostic, selectable tweaks)
 
 on:
   workflow_dispatch:
@@ -10,6 +10,10 @@ on:
         default: 'https://www.dropbox.com/scl/fi/odyv50o9pgx7fh8nr8u5h/com.google.ios.youtube-21.45.4-Decrypted.ipa?rlkey=q8sq80ak1t8qr0pwe1t8f448e&st=tqx7k2kt&dl=1'
       add_ryd:
         description: Return YouTube Dislike (sideload compatible filter; default ON)
+        type: boolean
+        default: true
+      ryd_diagnostics:
+        description: Add privacy-safe RYD on-device diagnostic logs (default ON)
         type: boolean
         default: true
       add_ytuhd:
@@ -144,6 +148,7 @@ jobs:
       - name: Build selected tweak DEBs together (no individual artifacts)
         env:
           ADD_RYD: ${{ inputs.add_ryd }}
+          RYD_DIAGNOSTICS: ${{ inputs.ryd_diagnostics }}
           ADD_YTUHD: ${{ inputs.add_ytuhd }}
           ADD_YTABCONFIG: ${{ inputs.add_ytabconfig }}
           ADD_YTSILENTVOTE: ${{ inputs.add_ytsilentvote }}
@@ -197,6 +202,47 @@ jobs:
           p.write_bytes(plistlib.dumps({'Filter': {'Executables': ['YouTube']}}, fmt=plistlib.FMT_XML))
           print('RYD sideload filter: Executables = YouTube (bundle-ID independent)')
           PY_RYD_FILTER
+            fi
+            if [[ "$key" == ryd && "$RYD_DIAGNOSTICS" == true ]]; then
+              python3 - "$out" <<'PY_RYD_DIAGNOSTIC'
+          from pathlib import Path
+          import sys
+          root = Path(sys.argv[1])
+          api = root / 'API.x'
+          tweak = root / 'Tweak.x'
+          if not api.is_file() or not tweak.is_file():
+              sys.exit('RYD diagnostics: required upstream sources not found')
+          a = api.read_text()
+          t = tweak.read_text()
+          def replace_once(source, old, new, label):
+              if source.count(old) != 1:
+                  sys.exit(f'RYD diagnostics: upstream changed ({label}); cannot safely instrument')
+              return source.replace(old, new, 1)
+          # No video ID, URL, vote data, or account identifiers are printed.
+          a = replace_once(a,
+              'NSUInteger responseCode = [httpResponse statusCode];',
+              'NSUInteger responseCode = [httpResponse statusCode];\n    NSLog(@"[RYD-DIAG] API HTTP status=%lu networkError=%d", (unsigned long)responseCode, error != nil);',
+              'API status')
+          a = replace_once(a,
+              'dispatch_async(dispatch_get_main_queue(), ^{\n            dataHandler(myData);',
+              'NSLog(@"[RYD-DIAG] API JSON parsed successfully");\n        dispatch_async(dispatch_get_main_queue(), ^{\n            dataHandler(myData);',
+              'API JSON callback')
+          t = replace_once(t,
+              '    YTQTMButton *dislikeButton = self.dislikeButton;',
+              '    NSLog(@"[RYD-DIAG] Shorts like/dislike hook invoked");\n    YTQTMButton *dislikeButton = self.dislikeButton;',
+              'Shorts hook')
+          t = replace_once(t,
+              '    getVoteFromVideoWithHandler(cache, videoId, maxRetryCount, ^(NSDictionary *data, NSString *error) {',
+              '    NSLog(@"[RYD-DIAG] Requesting vote data from UI hook");\n    getVoteFromVideoWithHandler(cache, videoId, maxRetryCount, ^(NSDictionary *data, NSString *error) {',
+              'general video request hook')
+          t = replace_once(t,
+              '        HBLogDebug(@"RYD: Vote data for video %@: %@", videoId, data);',
+              '        NSLog(@"[RYD-DIAG] UI vote callback hasData=%d hasError=%d", data != nil, error != nil);',
+              'general video callback')
+          api.write_text(a)
+          tweak.write_text(t)
+          print('RYD privacy-safe diagnostics enabled: API status, callback, shorts hook, video hook')
+          PY_RYD_DIAGNOSTIC
             fi
             if [[ "$key" == donteatmycontent ]]; then
               python3 - "$out" <<'PY_PATCH'
@@ -313,6 +359,28 @@ jobs:
           find extra-debs -maxdepth 1 -type f -name '*.deb' -print | sort
           echo 'Skipped optional tweaks:'
           cat selected-failed.txt
+
+      - name: RYD public API preflight (CI network only)
+        if: ${{ inputs.add_ryd && inputs.ryd_diagnostics }}
+        shell: bash
+        run: |
+          set -uo pipefail
+          echo '## RYD API preflight (GitHub runner, NOT iPhone)' >> "$GITHUB_STEP_SUMMARY"
+          result="$(curl -sS -L --connect-timeout 10 --max-time 20 -o "$RUNNER_TEMP/ryd-api.json" -w '%{http_code}' 'https://returnyoutubedislikeapi.com/votes?videoId=dQw4w9WgXcQ')" || result='NETWORK_ERROR'
+          echo "HTTP status: $result" >> "$GITHUB_STEP_SUMMARY"
+          if [[ "$result" == 200 ]]; then
+            python3 - "$RUNNER_TEMP/ryd-api.json" "$GITHUB_STEP_SUMMARY" <<'PY_RYD_API'
+          import json,sys
+          try:
+              obj=json.load(open(sys.argv[1]))
+              ok=isinstance(obj,dict) and 'dislikes' in obj
+              message='JSON contains dislikes field: '+str(ok)
+          except (ValueError, OSError) as ex:
+              message='JSON parse error: '+type(ex).__name__
+          with open(sys.argv[2],'a') as f: f.write(message+'\n')
+          PY_RYD_API
+          fi
+          echo 'This preflight does not demonstrate on-device connectivity or UI compatibility.' >> "$GITHUB_STEP_SUMMARY"
 
       - name: Download decrypted IPA
         env:
@@ -505,7 +573,8 @@ jobs:
           echo '### Requested tweak options' >> "$GITHUB_STEP_SUMMARY"
           if [[ -s requested-tweaks.txt ]]; then cat requested-tweaks.txt >> "$GITHUB_STEP_SUMMARY"; else echo 'None' >> "$GITHUB_STEP_SUMMARY"; fi
           echo '**RYD:** Executable-based substrate filter applied when requested; if the dislike count still does not appear, test RYD alone because current YouTube UI layouts and other tweaks may conflict.' >> "$GITHUB_STEP_SUMMARY"
-          echo '**Note:** Device launch and tweak functionality are not proven by static checks.' >> "$GITHUB_STEP_SUMMARY"
+          echo '**RYD diagnostics:** If enabled, connect the iPhone to a Mac, open Console, select the device, filter for RYD-DIAG, then open a standard video and a Short. Logs are emitted only when code paths execute; absence is itself diagnostic.' >> "$GITHUB_STEP_SUMMARY"
+          echo '**Note:** CI API testing cannot prove iPhone connectivity, runtime hook invocation, or dislike display.' >> "$GITHUB_STEP_SUMMARY"
           if [[ "$integration" == fallback* ]]; then
             echo '::warning::Requested tweaks were not included. Final IPA is marked FALLBACK in its filename.'
           fi
