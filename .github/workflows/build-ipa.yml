@@ -1,4 +1,4 @@
-name: IPA (RYD runtime selector audit v4, selectable tweaks)
+name: IPA (RYD action-path audit v5, selectable tweaks)
 
 on:
   workflow_dispatch:
@@ -272,6 +272,53 @@ jobs:
               'NSLog(@"[RYD-DIAG] UI vote callback hasData=%d hasError=%d", data != nil, error != nil);'
               '\n        [[NSUserDefaults standardUserDefaults] setObject:[NSString stringWithFormat:@"hasData=%d, hasError=%d", data != nil, error != nil] forKey:@"RYDDiagCallback"];',
               'callback marker')
+          # v5: observe upstream hook ENTRY before layout / video-ID filtering.
+          # This distinguishes missing hook invocation from a changed UI layout.
+          # No actual IDs, counts, media metadata, or account values are recorded.
+          early_anchor = '- (ELMCellNode *)nodeForItemAtIndexPath:(NSIndexPath *)indexPath {'
+          t = replace_once(t, early_anchor, early_anchor + r'''
+              static BOOL rydDidRecordCollection = NO;
+              static BOOL rydDidRecordActionCollection = NO;
+              if (!rydDidRecordCollection) {
+                  rydDidRecordCollection = YES;
+                  [[NSUserDefaults standardUserDefaults] setObject:@"호출됨" forKey:@"RYDPathCollectionEntry"];
+              }
+              NSString *rydCollectionId = self.accessibilityIdentifier;
+              if (!rydDidRecordActionCollection &&
+                  [rydCollectionId containsString:@"video"] &&
+                  [rydCollectionId containsString:@"action_bar"]) {
+                  rydDidRecordActionCollection = YES;
+                  // Log a fixed label, not arbitrary identifiers from view data.
+                  NSString *kind = [rydCollectionId isEqualToString:@"id.video.scrollable_action_bar"]
+                      ? @"기존 scrollable_action_bar"
+                      : ([rydCollectionId isEqualToString:@"id.video.non_scrollable_action_bar"]
+                          ? @"non_scrollable_action_bar" : @"다른 video action_bar");
+                  [[NSUserDefaults standardUserDefaults] setObject:kind forKey:@"RYDPathActionKind"];
+              }
+          ''' , 'ASCollectionView entry')
+          # The upstream matching function uses one literal ID; record whether
+          # this branch is reached before any potentially fragile tree traversal.
+          t = replace_once(t,
+              'else if (isVideoScrollableActionBar(self, node)) {',
+              'else if (isVideoScrollableActionBar(self, node)) {\n        [[NSUserDefaults standardUserDefaults] setObject:@"진입함" forKey:@"RYDPathActionBranch"];',
+              'regular action bar branch')
+          # Use a hook that v4 proved exists; do not guess signatures for
+          # YTReelWatchLikesController's newly named methods.
+          shorts_anchor = '%hook YTReelWatchPlaybackOverlayView\n'
+          if t.count(shorts_anchor) != 1:
+              sys.exit('v5: overlay class hook changed')
+          begin, after = t.split(shorts_anchor, 1)
+          method_anchor = '- (void)layoutActionBar {'
+          if after.count(method_anchor) < 1:
+              sys.exit('v5: overlay layoutActionBar missing')
+          after = after.replace(method_anchor, method_anchor + r'''
+              static BOOL rydDidRecordShortOverlay = NO;
+              if (!rydDidRecordShortOverlay) {
+                  rydDidRecordShortOverlay = YES;
+                  [[NSUserDefaults standardUserDefaults] setObject:@"호출됨" forKey:@"RYDPathShortOverlay"];
+              }
+          ''', 1)
+          t = begin + shorts_anchor + after
           settings = root / 'Settings.x'
           if not settings.is_file():
               sys.exit('RYD on-device diagnostics: Settings.x missing')
@@ -457,7 +504,41 @@ jobs:
               settingItemId:0];
           [sectionItems addObject:selectorAuditItem];
           '''
-          contents = contents.replace(anchor, anchor + '\n' + diagnostic_item + '\n' + compatibility_item, 1)
+          # v5 compact on-device route inspector. It records only named
+          # Objective-C execution paths; it does not log video or account data.
+          action_path_item = r'''
+          YTSettingsSectionItem *routeItem = [%c(YTSettingsSectionItem) switchItemWithTitle:@"RYD 화면 경로 검사 v5 (탭)"
+              titleDescription:@"일반 동영상/Shorts 화면 진입 경로 확인 (Mac 불필요)"
+              accessibilityIdentifier:nil
+              switchOn:NO
+              switchBlock:^BOOL (YTSettingsCell *cell, BOOL newValue) {
+                  NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+                  NSArray<NSString *> *keys = @[@"RYDPathCollectionEntry", @"RYDPathActionKind",
+                      @"RYDPathActionBranch", @"RYDPathShortOverlay"];
+                  NSArray<NSString *> *titles = @[@"일반 화면 컬렉션 훅", @"동영상 버튼 영역 유형",
+                      @"기존 버튼 경로 진입", @"Shorts 오버레이 훅"];
+                  NSMutableArray<NSString *> *items = [NSMutableArray array];
+                  for (NSUInteger index = 0; index < keys.count; index++) {
+                      NSString *saved = [defaults stringForKey:keys[index]];
+                      [items addObject:[NSString stringWithFormat:@"%@: %@", titles[index], saved ?: @"기록 없음"]];
+                  }
+                  NSString *details = [items componentsJoinedByString:@"\n"];
+                  UIAlertController *panel = [UIAlertController alertControllerWithTitle:@"RYD 화면 경로 v5"
+                      message:details preferredStyle:UIAlertControllerStyleAlert];
+                  [panel addAction:[UIAlertAction actionWithTitle:@"복사" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+                      [UIPasteboard generalPasteboard].string = details;
+                  }]];
+                  [panel addAction:[UIAlertAction actionWithTitle:@"초기화" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *action) {
+                      for (NSString *key in keys) [defaults removeObjectForKey:key];
+                  }]];
+                  [panel addAction:[UIAlertAction actionWithTitle:@"닫기" style:UIAlertActionStyleCancel handler:nil]];
+                  dispatch_async(dispatch_get_main_queue(), ^{ [delegate presentViewController:panel animated:YES completion:nil]; });
+                  return NO;
+              }
+              settingItemId:0];
+          [sectionItems addObject:routeItem];
+          '''
+          contents = contents.replace(anchor, anchor + '\n' + diagnostic_item + '\n' + compatibility_item + '\n' + action_path_item, 1)
 
           contents = '#import <objc/runtime.h>\n#import <UIKit/UIKit.h>\n' + contents
           # Constructor runs when RYD's dylib is loaded, before screen-specific hooks.
@@ -470,7 +551,7 @@ jobs:
           settings.write_text(contents)
           api.write_text(a)
           tweak.write_text(t)
-          print('RYD in-app diagnostics v4 with runtime selector audit enabled: Settings > Return YouTube Dislike > RYD 진단 보기 / RYD API 직접 검사')
+          print('RYD in-app diagnostics v5 with action route audit enabled: Settings > Return YouTube Dislike > RYD 진단 보기 / RYD API 직접 검사')
           print('RYD privacy-safe diagnostics enabled: API status, callback, shorts hook, video hook')
           PY_RYD_DIAGNOSTIC
             fi
@@ -803,7 +884,7 @@ jobs:
           echo '### Requested tweak options' >> "$GITHUB_STEP_SUMMARY"
           if [[ -s requested-tweaks.txt ]]; then cat requested-tweaks.txt >> "$GITHUB_STEP_SUMMARY"; else echo 'None' >> "$GITHUB_STEP_SUMMARY"; fi
           echo '**RYD:** Executable-based substrate filter applied when requested; if the dislike count still does not appear, test RYD alone because current YouTube UI layouts and other tweaks may conflict.' >> "$GITHUB_STEP_SUMMARY"
-          echo '**RYD diagnostics v4:** On iPhone open YouTube > Settings > Return YouTube Dislike > RYD 진단 보기 (탭). Run RYD API 직접 검사 on the iPhone, then watch a video and Short; open RYD 진단 보기 and copy the results. A Mac is NOT required. If the setting entry is absent or the build failed, check the build summary.' >> "$GITHUB_STEP_SUMMARY"
+          echo '**RYD diagnostics v5:** On iPhone open YouTube > Settings > Return YouTube Dislike > RYD 진단 보기 (탭). Run RYD API 직접 검사 on the iPhone, then watch a video and Short; open RYD 진단 보기 and copy the results. A Mac is NOT required. If the setting entry is absent or the build failed, check the build summary.' >> "$GITHUB_STEP_SUMMARY"
           echo '**Note:** CI API testing cannot prove iPhone connectivity, runtime hook invocation, or dislike display.' >> "$GITHUB_STEP_SUMMARY"
           if [[ "$integration" == fallback* ]]; then
             echo '::warning::Requested tweaks were not included. Final IPA is marked FALLBACK in its filename.'
