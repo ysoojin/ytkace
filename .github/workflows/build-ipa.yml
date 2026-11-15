@@ -1,4 +1,4 @@
-name: IPA (RYD on-device diagnostics v2, selectable tweaks)
+name: IPA (RYD runtime selector audit v4, selectable tweaks)
 
 on:
   workflow_dispatch:
@@ -392,6 +392,70 @@ jobs:
               }
               settingItemId:0];
           [sectionItems addObject:hookAuditItem];
+          YTSettingsSectionItem *selectorAuditItem = [%c(YTSettingsSectionItem) switchItemWithTitle:@"RYD 메서드 후보 조사 v4 (탭)"
+              titleDescription:@"현재 실행 중인 YouTube에서 관련 메서드 이름을 찾습니다 (개인정보 수집 없음)"
+              accessibilityIdentifier:nil
+              switchOn:NO
+              switchBlock:^BOOL (YTSettingsCell *cell, BOOL newValue) {
+                  // Inspect Objective-C metadata only. Do not invoke methods, alter app state,
+                  // read video IDs, touch user data or enumerate objects.
+                  NSArray<NSString *> *classNames = @[
+                      @"YTReelWatchLikesController", @"YTReelWatchPlaybackOverlayView",
+                      @"YTReelWatchPlaybackOverlayViewSub", @"ASCollectionView",
+                      @"YTAsyncCollectionView", @"YTRollingNumberNode", @"ELMNodeFactory"
+                  ];
+                  NSMutableArray<NSString *> *lines = [NSMutableArray array];
+                  for (NSString *name in classNames) {
+                      Class cls = NSClassFromString(name);
+                      if (!cls) {
+                          [lines addObject:[NSString stringWithFormat:@"%@: CLASS MISSING", name]];
+                          continue;
+                      }
+                      NSMutableSet<NSString *> *found = [NSMutableSet set];
+                      Class cursor = cls;
+                      NSUInteger inheritedLevels = 0;
+                      while (cursor && inheritedLevels < 3) {
+                          unsigned int count = 0;
+                          Method *methods = class_copyMethodList(cursor, &count);
+                          for (unsigned int i = 0; i < count; i++) {
+                              NSString *sel = NSStringFromSelector(method_getName(methods[i]));
+                              NSString *low = [sel lowercaseString];
+                              if ([low containsString:@"like"] || [low containsString:@"dislike"] ||
+                                  [low containsString:@"vote"] || [low containsString:@"actionbar"] ||
+                                  [low containsString:@"overlay"] || [low containsString:@"rolling"] ||
+                                  [low containsString:@"nodeforitem"] || [low containsString:@"pagestyle"]) {
+                                  [found addObject:sel];
+                              }
+                          }
+                          if (methods) free(methods);
+                          cursor = class_getSuperclass(cursor);
+                          inheritedLevels++;
+                      }
+                      NSArray<NSString *> *sorted = [[found allObjects] sortedArrayUsingSelector:@selector(compare:)];
+                      NSUInteger max = MIN(sorted.count, (NSUInteger)25);
+                      NSArray<NSString *> *limited = [sorted subarrayWithRange:NSMakeRange(0, max)];
+                      [lines addObject:[NSString stringWithFormat:@"%@ (%lu candidates): %@%@", name,
+                          (unsigned long)sorted.count,
+                          limited.count ? [limited componentsJoinedByString:@", "] : @"NONE",
+                          sorted.count > max ? @" [truncated]" : @""]];
+                  }
+                  NSString *report = [NSString stringWithFormat:@"RYD v4 selector audit | %@\n\n%@\n\nMetadata only; selector presence does not prove that hooks fire.",
+                      [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"version unknown",
+                      [lines componentsJoinedByString:@"\n\n"]];
+                  // Pasteboard allows sharing without a Mac or telemetry.
+                  [UIPasteboard generalPasteboard].string = report;
+                  UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"RYD 메서드 조사 v4"
+                      message:@"검사 결과를 클립보드에 복사했습니다. 이 대화에 붙여넣어 보내 주세요."
+                      preferredStyle:UIAlertControllerStyleAlert];
+                  [alert addAction:[UIAlertAction actionWithTitle:@"다시 복사" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+                      [UIPasteboard generalPasteboard].string = report;
+                  }]];
+                  [alert addAction:[UIAlertAction actionWithTitle:@"닫기" style:UIAlertActionStyleCancel handler:nil]];
+                  dispatch_async(dispatch_get_main_queue(), ^{ [delegate presentViewController:alert animated:YES completion:nil]; });
+                  return NO;
+              }
+              settingItemId:0];
+          [sectionItems addObject:selectorAuditItem];
           '''
           contents = contents.replace(anchor, anchor + '\n' + diagnostic_item + '\n' + compatibility_item, 1)
 
@@ -406,7 +470,7 @@ jobs:
           settings.write_text(contents)
           api.write_text(a)
           tweak.write_text(t)
-          print('RYD in-app diagnostics v3 with runtime hook audit enabled: Settings > Return YouTube Dislike > RYD 진단 보기 / RYD API 직접 검사')
+          print('RYD in-app diagnostics v4 with runtime selector audit enabled: Settings > Return YouTube Dislike > RYD 진단 보기 / RYD API 직접 검사')
           print('RYD privacy-safe diagnostics enabled: API status, callback, shorts hook, video hook')
           PY_RYD_DIAGNOSTIC
             fi
@@ -739,7 +803,7 @@ jobs:
           echo '### Requested tweak options' >> "$GITHUB_STEP_SUMMARY"
           if [[ -s requested-tweaks.txt ]]; then cat requested-tweaks.txt >> "$GITHUB_STEP_SUMMARY"; else echo 'None' >> "$GITHUB_STEP_SUMMARY"; fi
           echo '**RYD:** Executable-based substrate filter applied when requested; if the dislike count still does not appear, test RYD alone because current YouTube UI layouts and other tweaks may conflict.' >> "$GITHUB_STEP_SUMMARY"
-          echo '**RYD diagnostics v3:** On iPhone open YouTube > Settings > Return YouTube Dislike > RYD 진단 보기 (탭). Run RYD API 직접 검사 on the iPhone, then watch a video and Short; open RYD 진단 보기 and copy the results. A Mac is NOT required. If the setting entry is absent or the build failed, check the build summary.' >> "$GITHUB_STEP_SUMMARY"
+          echo '**RYD diagnostics v4:** On iPhone open YouTube > Settings > Return YouTube Dislike > RYD 진단 보기 (탭). Run RYD API 직접 검사 on the iPhone, then watch a video and Short; open RYD 진단 보기 and copy the results. A Mac is NOT required. If the setting entry is absent or the build failed, check the build summary.' >> "$GITHUB_STEP_SUMMARY"
           echo '**Note:** CI API testing cannot prove iPhone connectivity, runtime hook invocation, or dislike display.' >> "$GITHUB_STEP_SUMMARY"
           if [[ "$integration" == fallback* ]]; then
             echo '::warning::Requested tweaks were not included. Final IPA is marked FALLBACK in its filename.'
