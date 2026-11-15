@@ -1,4 +1,4 @@
-name: IPA (YTKACE + selectable tweaks, shared sideload IPA)
+name: IPA (YTKACE + expanded selectable tweaks, shared sideload IPA)
 
 on:
   workflow_dispatch:
@@ -26,6 +26,14 @@ on:
         default: false
       add_donteatmycontent:
         description: DontEatMyContent (untested; default OFF)
+        type: boolean
+        default: false
+      add_youmute:
+        description: YouMute quick mute button (default OFF)
+        type: boolean
+        default: false
+      add_yougroupsettings:
+        description: YouGroupSettings grouped tweak settings (default OFF)
         type: boolean
         default: false
 
@@ -118,7 +126,7 @@ jobs:
       - name: Install IPA signing tool
         run: brew install ldid
       - name: Install optional DEB and cyan tools
-        if: ${{ inputs.add_ryd || inputs.add_ytuhd || inputs.add_ytabconfig || inputs.add_ytsilentvote || inputs.add_donteatmycontent }}
+        if: ${{ inputs.add_ryd || inputs.add_ytuhd || inputs.add_ytabconfig || inputs.add_ytsilentvote || inputs.add_donteatmycontent || inputs.add_youmute || inputs.add_yougroupsettings }}
         run: |
           set -euo pipefail
           brew install dpkg
@@ -127,7 +135,7 @@ jobs:
           command -v cyan
           cyan --help >/dev/null
       - name: Install Theos for selected tweaks
-        if: ${{ inputs.add_ryd || inputs.add_ytuhd || inputs.add_ytabconfig || inputs.add_ytsilentvote || inputs.add_donteatmycontent }}
+        if: ${{ inputs.add_ryd || inputs.add_ytuhd || inputs.add_ytabconfig || inputs.add_ytsilentvote || inputs.add_donteatmycontent || inputs.add_youmute || inputs.add_yougroupsettings }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -140,6 +148,8 @@ jobs:
           ADD_YTABCONFIG: ${{ inputs.add_ytabconfig }}
           ADD_YTSILENTVOTE: ${{ inputs.add_ytsilentvote }}
           ADD_DONTEATMYCONTENT: ${{ inputs.add_donteatmycontent }}
+          ADD_YOUMUTE: ${{ inputs.add_youmute }}
+          ADD_YOUGROUPSETTINGS: ${{ inputs.add_yougroupsettings }}
         shell: bash
         run: |
           set -euo pipefail
@@ -147,7 +157,7 @@ jobs:
           : > selected-success.txt
           : > selected-failed.txt
           : > requested-tweaks.txt
-          for pair in "ryd:$ADD_RYD" "ytuhd:$ADD_YTUHD" "ytabconfig:$ADD_YTABCONFIG" "ytsilentvote:$ADD_YTSILENTVOTE" "donteatmycontent:$ADD_DONTEATMYCONTENT"; do
+          for pair in "ryd:$ADD_RYD" "ytuhd:$ADD_YTUHD" "ytabconfig:$ADD_YTABCONFIG" "ytsilentvote:$ADD_YTSILENTVOTE" "donteatmycontent:$ADD_DONTEATMYCONTENT" "youmute:$ADD_YOUMUTE" "yougroupsettings:$ADD_YOUGROUPSETTINGS"; do
             if [[ "${pair##*:}" == true ]]; then printf '%s\n' "${pair%%:*}" >> requested-tweaks.txt; fi
           done
           # Optional tweak build failures are reported, not fatal.
@@ -235,6 +245,8 @@ jobs:
           build_one ytabconfig PoomSmart/YTABConfig "$ADD_YTABCONFIG"
           build_one ytsilentvote PoomSmart/YTSilentVote "$ADD_YTSILENTVOTE"
           build_one donteatmycontent therealFoxster/DontEatMyContent "$ADD_DONTEATMYCONTENT"
+          build_one youmute PoomSmart/YouMute "$ADD_YOUMUTE"
+          build_one yougroupsettings PoomSmart/YouGroupSettings "$ADD_YOUGROUPSETTINGS"
           echo 'Successfully built optional DEB packages:'
           find extra-debs -maxdepth 1 -type f -name '*.deb' -print | sort
           echo 'Skipped optional tweaks:'
