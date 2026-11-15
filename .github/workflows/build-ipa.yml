@@ -1,4 +1,4 @@
-name: IPA (RYD identifier audit v7.1, required RYD verified)
+name: IPA (RYD identifier audit v7.2, scope fix and required RYD)
 
 on:
   workflow_dispatch:
@@ -358,13 +358,13 @@ jobs:
               static NSUInteger rydV7Observed = 0;
               if (rydV7Observed < 1500) {
                   @synchronized([NSUserDefaults standardUserDefaults]) {
+                      NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
                       rydV7Observed++;
                       NSString *raw = self.accessibilityIdentifier;
                       if ([raw isKindOfClass:[NSString class]] && [raw containsString:@"video"] &&
                           ![raw isEqualToString:@"id.video.scrollable_action_bar"] &&
                           ![raw isEqualToString:@"id.video.non_scrollable_action_bar"] &&
                           ![raw containsString:@"action_bar"]) {
-                          NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
                           [d setInteger:[d integerForKey:@"RYDV7OtherVideoSeen"] + 1 forKey:@"RYDV7OtherVideoSeen"];
                           BOOL approved = [raw hasPrefix:@"id.video."] && raw.length <= 96;
                           if (approved) {
