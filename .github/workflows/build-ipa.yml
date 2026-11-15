@@ -210,6 +210,30 @@ jobs:
                   t.write_text(ts.replace('#import "Tweak.h"','#import "Tweak.h"\nCGFloat constant;',1))
           PY_PATCH
             fi
+            # On the default macOS runner filesystem, a sibling symlink whose
+            # name differs only by case can resolve to the lowercase checkout.
+            # Clang treats this as -Wnonportable-include-path (an error).
+            # Rewrite the two upstream relative includes to the actual
+            # checkout path instead; do not modify the helper source itself.
+            if [[ "$key" == youmute ]]; then
+              python3 - "$out" <<'PY_YOUMUTE_CASE'
+          from pathlib import Path
+          import sys
+          source = Path(sys.argv[1]) / 'Tweak.x'
+          helper = Path(sys.argv[1]).parent / 'ytvideooverlay'
+          if not source.is_file() or not (helper / 'Header.h').is_file() or not (helper / 'Init.x').is_file():
+              sys.exit('YouMute/YTVideoOverlay required source files are missing')
+          contents = source.read_text()
+          for filename in ('Header.h', 'Init.x'):
+              before = '../YTVideoOverlay/' + filename
+              after = '../ytvideooverlay/' + filename
+              if contents.count(before) != 1:
+                  sys.exit(f'Unexpected YouMute include: {before}')
+              contents = contents.replace(before, after, 1)
+          source.write_text(contents)
+          print('YouMute includes matched to lowercase ytvideooverlay checkout')
+          PY_YOUMUTE_CASE
+            fi
             # Run compilation in a contained command, so a single optional
             # failure cannot abort the entire IPA build.
             if ! ( cd "$out"
@@ -272,8 +296,8 @@ jobs:
           if [[ "$ADD_YOUMUTE" == true ]]; then
             build_one ytvideooverlay PoomSmart/YTVideoOverlay true
             if [[ -s extra-debs/ytvideooverlay.deb ]] && [[ -f sources/ytvideooverlay/Header.h ]] && [[ -f sources/ytvideooverlay/Init.x ]]; then
-              # The upstream relative includes require the literal sibling name.
-              ln -sfn ytvideooverlay sources/YTVideoOverlay
+              # Match imports to the actual lowercase checkout in build_one.
+              # Avoid case-only symlinks on macOS case-insensitive filesystems.
               build_one youmute PoomSmart/YouMute true
             else
               echo 'FAILED youmute: required YTVideoOverlay helper could not be built' | tee -a selected-failed.txt
