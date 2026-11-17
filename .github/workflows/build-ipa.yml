@@ -1,5 +1,5 @@
 name: IPA (YTKACE + RYD v10.14 verified panel display)
-true:
+on:
   workflow_dispatch:
     inputs:
       ipa_url:
