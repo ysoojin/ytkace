@@ -1,5 +1,5 @@
-name: IPA (YTKACE + RYD v10.13 post-panel reconcile)
-on:
+name: IPA (YTKACE + RYD v10.14 verified panel display)
+true:
   workflow_dispatch:
     inputs:
       ipa_url:
@@ -370,7 +370,11 @@ jobs:
         \ value. The textual panel value may differ from callback data when\\n// the UI is reused or receives another asynchronous\
         \ update. Do not guess it.\\n// v10.12: inspect the actual rendered rolling-number UIView, not only\\n// updatedCount/updatedCountNumber\
         \ (which v10.11 proved can remain zero).\\n// This is strictly scoped to the dislike rolling-number node supplied\
-        \ by RYD.\\nstatic char rydV1012VideoKey;\\nstatic void rydV1012CollectNumericLabels(UIView *view, NSMutableSet<NSString\
+        \ by RYD.\\nstatic char rydV1012VideoKey;\\n// v10.14: distinguish actual rendered panel values from preliminary callbacks.\\\
+        n// Store only one pending snapshot per rolling node; the per-video verified cache\\n// is session-only and is never\
+        \ persisted. Consecutive identical frames are\\n// required to avoid copying a number mid-animation.\\nstatic char\
+        \ rydV1014PreviousVisualKey;\\nstatic char rydV1014VisualVideoKey;\\nstatic NSMutableDictionary<NSString *, NSString\
+        \ *> *rydV1014VerifiedVisualCounts;\\n\\nstatic void rydV1012CollectNumericLabels(UIView *view, NSMutableSet<NSString\
         \ *> *values, NSUInteger *budget) {\\n    if (!view || *budget == 0) return;\\n    --(*budget);\\n    if ([view isKindOfClass:[UILabel\
         \ class]]) {\\n        NSString *value = ((UILabel *)view).text;\\n        if ([value isKindOfClass:[NSString class]])\
         \ {\\n            // Only an isolated non-negative integer, with optional thousands separators.\\n            NSString\
@@ -393,46 +397,58 @@ jobs:
         one candidate\" : @\"ambiguous candidates\") forKey:@\"RYDV1012VisualStatus\"];\\n    // Never guess which number\
         \ belongs to dislike when multiple candidates exist.\\n    if (values.count != 1) return;\\n    NSString *value =\
         \ values.anyObject;\\n    long long numeric = [value longLongValue];\\n    if (numeric <= 0 || numeric > 1000000000LL)\
-        \ return;\\n    // Apply only to an explicitly tagged video ID. This does not persist votes.\\n    rydV105PanelCount(videoId,\
-        \ value, @(numeric));\\n    [trace setObject:@\"positive rendered count forwarded\" forKey:@\"RYDV1012VisualStatus\"\
-        ];\\n}\\nstatic void rydV1012ScheduleVisualPanel(NSString *videoId, YTRollingNumberNode *node) {\\n    if (![node\
-        \ isKindOfClass:NSClassFromString(@\"YTRollingNumberNode\")] || videoId.length != 11) return;\\n    objc_setAssociatedObject(node,\
-        \ &rydV1012VideoKey, [videoId copy], OBJC_ASSOCIATION_COPY_NONATOMIC);\\n    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,\
-        \ (int64_t)(0.35 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{\\n        rydV1012CaptureVisualPanel(videoId, node);\\\
-        n    });\\n    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.85 * NSEC_PER_SEC)), dispatch_get_main_queue(),\
-        \ ^{\\n        rydV1012CaptureVisualPanel(videoId, node);\\n    });\\n}\\n\\nstatic void rydV1011CheckRenderedPanel(NSString\
-        \ *videoId, NSString *count, NSNumber *number, YTRollingNumberNode *node) {\\n    if (![NSThread isMainThread]) {\\\
-        n        dispatch_async(dispatch_get_main_queue(), ^{ rydV1011CheckRenderedPanel(videoId, count, number, node); });\\\
-        n        return;\\n    }\\n    if (![node isKindOfClass:NSClassFromString(@\"YTRollingNumberNode\")]) return;\\n \
-        \   // The source callback is still recorded so we can compare it with the\\n    // value set on the rolling-number\
-        \ node. Avoid storing vote values/IDs.\\n    NSUserDefaults *trace = [NSUserDefaults standardUserDefaults];\\n   \
-        \ [trace setInteger:[trace integerForKey:@\"RYDTracePanelRenderChecks\"] + 1 forKey:@\"RYDTracePanelRenderChecks\"\
-        ];\\n    NSString *nodeText = nil;\\n    NSNumber *nodeNumber = nil;\\n    @try {\\n        nodeText = [node updatedCount];\\\
-        n        nodeNumber = [node updatedCountNumber];\\n    } @catch (NSException *exception) {\\n        [trace setObject:@\"\
-        property read failed\" forKey:@\"RYDTracePanelAfterRender\"];\\n        return;\\n    }\\n    if (![nodeText isKindOfClass:[NSString\
-        \ class]]) nodeText = nil;\\n    NSString *expectedText = [NSString stringWithFormat:@\"• %@\", count ?: @\"\"];\\\
-        n    BOOL textMatches = nodeText && [nodeText isEqualToString:expectedText];\\n    BOOL numericMatches = [nodeNumber\
-        \ isKindOfClass:[NSNumber class]] &&\\n                          [number isKindOfClass:[NSNumber class]] &&\\n   \
-        \                       [nodeNumber isEqualToNumber:number];\\n    [trace setObject:(textMatches ? @\"yes\" : @\"\
-        no\") forKey:@\"RYDTracePanelTextMatches\"];\\n    [trace setObject:(numericMatches ? @\"yes\" : @\"no\") forKey:@\"\
-        RYDTracePanelNumberMatches\"];\\n    BOOL renderPositive = [nodeNumber isKindOfClass:[NSNumber class]] && [nodeNumber\
-        \ doubleValue] > 0;\\n    [trace setObject:(renderPositive ? @\"positive\" : @\"zero / unknown\") forKey:@\"RYDTracePanelRenderValue\"\
-        ];\\n    // Only forward if the node says it is showing the same callback value.\\n    // Inconsistency is reported\
-        \ rather than propagating a possibly stale zero.\\n    if (textMatches && numericMatches && [videoId isKindOfClass:[NSString\
-        \ class]] && videoId.length == 11)\\n        rydV105PanelCount(videoId, count, number);\\n    else\\n        [trace\
-        \ setObject:@\"skipped: panel node disagrees with callback\" forKey:@\"RYDTracePanelForwarding\"];\\n}\\n\\n// v10.13:\
-        \ A panel update can be followed by YouTube relayout/cell reuse.\\n// Reconcile only already-tagged dislike labels\
-        \ for the exact same video ID.\\n// Never infer video IDs from visible text and never override with zero.\\nstatic\
-        \ void rydV1013ReconcileConfirmed(NSString *videoId, NSString *value) {\\n    if (![NSThread isMainThread] || videoId.length\
-        \ != 11 || value.length == 0) return;\\n    if (![rydV105PanelCounts[videoId] isEqualToString:value]) return;\\n \
-        \   NSUInteger updated = 0;\\n    NSUInteger attached = 0;\\n    for (UIView *view in [rydV104Views allObjects]) {\\\
-        n        if (![objc_getAssociatedObject(view, &rydV10VideoKey) isEqualToString:videoId]) continue;\\n        UILabel\
-        \ *label = objc_getAssociatedObject(view, &rydV10LabelKey);\\n        if (!label || label.superview != view) continue;\\\
-        n        label.text = value;\\n        updated++;\\n        if (view.window != nil) attached++;\\n    }\\n    NSUserDefaults\
-        \ *trace = [NSUserDefaults standardUserDefaults];\\n    [trace setInteger:[trace integerForKey:@\"RYDV1013Rechecks\"\
-        ] + 1 forKey:@\"RYDV1013Rechecks\"];\\n    [trace setInteger:(NSInteger)updated forKey:@\"RYDV1013Updated\"];\\n \
-        \   [trace setInteger:(NSInteger)attached forKey:@\"RYDV1013Attached\"];\\n    [trace setObject:(attached ? @\"visible\
-        \ label updated\" : updated ? @\"offscreen label updated\" : @\"no matching registered label\") forKey:@\"RYDV1013Status\"\
+        \ return;\\n    NSString *previousVideo = objc_getAssociatedObject(node, &rydV1014VisualVideoKey);\\n    NSString\
+        \ *previousValue = objc_getAssociatedObject(node, &rydV1014PreviousVisualKey);\\n    if (![previousVideo isEqualToString:videoId]\
+        \ || ![previousValue isEqualToString:value]) {\\n        objc_setAssociatedObject(node, &rydV1014VisualVideoKey, [videoId\
+        \ copy], OBJC_ASSOCIATION_COPY_NONATOMIC);\\n        objc_setAssociatedObject(node, &rydV1014PreviousVisualKey, [value\
+        \ copy], OBJC_ASSOCIATION_COPY_NONATOMIC);\\n        [trace setObject:@\"first visual sample (awaiting confirmation)\"\
+        \ forKey:@\"RYDV1014VisualStatus\"];\\n        return;\\n    }\\n    // The same positive value appeared in two separate\
+        \ samples of the exact\\n    // rolling-number node. Promote it over a preliminary API/callback value.\\n    if (!rydV1014VerifiedVisualCounts)\
+        \ rydV1014VerifiedVisualCounts = [NSMutableDictionary dictionary];\\n    if (rydV1014VerifiedVisualCounts.count >=\
+        \ 32 && !rydV1014VerifiedVisualCounts[videoId])\\n        [rydV1014VerifiedVisualCounts removeAllObjects];\\n    rydV1014VerifiedVisualCounts[videoId]\
+        \ = [value copy];\\n    rydV105PanelCount(videoId, value, @(numeric));\\n    [trace setObject:@\"confirmed visual\
+        \ count sent to main label\" forKey:@\"RYDV1014VisualStatus\"];\\n    [trace setObject:@\"same video ID, 2 matching\
+        \ samples\" forKey:@\"RYDV1014VisualValidation\"];\\n}\\nstatic void rydV1012ScheduleVisualPanel(NSString *videoId,\
+        \ YTRollingNumberNode *node) {\\n    if (![node isKindOfClass:NSClassFromString(@\"YTRollingNumberNode\")] || videoId.length\
+        \ != 11) return;\\n    objc_setAssociatedObject(node, &rydV1012VideoKey, [videoId copy], OBJC_ASSOCIATION_COPY_NONATOMIC);\\\
+        n    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{\\\
+        n        rydV1012CaptureVisualPanel(videoId, node);\\n    });\\n    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,\
+        \ (int64_t)(0.85 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{\\n        rydV1012CaptureVisualPanel(videoId, node);\\\
+        n    });\\n    // Read the rolling view again after its number transition settles.\\n    // A reused node with a different\
+        \ video ID is rejected in the reader.\\n    for (NSNumber *delay in @[@1.4, @2.2, @3.2]) {\\n        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,\
+        \ (int64_t)(delay.doubleValue * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{\\n            rydV1012CaptureVisualPanel(videoId,\
+        \ node);\\n        });\\n    }\\n}\\n\\nstatic void rydV1011CheckRenderedPanel(NSString *videoId, NSString *count,\
+        \ NSNumber *number, YTRollingNumberNode *node) {\\n    if (![NSThread isMainThread]) {\\n        dispatch_async(dispatch_get_main_queue(),\
+        \ ^{ rydV1011CheckRenderedPanel(videoId, count, number, node); });\\n        return;\\n    }\\n    if (![node isKindOfClass:NSClassFromString(@\"\
+        YTRollingNumberNode\")]) return;\\n    // The source callback is still recorded so we can compare it with the\\n \
+        \   // value set on the rolling-number node. Avoid storing vote values/IDs.\\n    NSUserDefaults *trace = [NSUserDefaults\
+        \ standardUserDefaults];\\n    [trace setInteger:[trace integerForKey:@\"RYDTracePanelRenderChecks\"] + 1 forKey:@\"\
+        RYDTracePanelRenderChecks\"];\\n    NSString *nodeText = nil;\\n    NSNumber *nodeNumber = nil;\\n    @try {\\n  \
+        \      nodeText = [node updatedCount];\\n        nodeNumber = [node updatedCountNumber];\\n    } @catch (NSException\
+        \ *exception) {\\n        [trace setObject:@\"property read failed\" forKey:@\"RYDTracePanelAfterRender\"];\\n   \
+        \     return;\\n    }\\n    if (![nodeText isKindOfClass:[NSString class]]) nodeText = nil;\\n    NSString *expectedText\
+        \ = [NSString stringWithFormat:@\"• %@\", count ?: @\"\"];\\n    BOOL textMatches = nodeText && [nodeText isEqualToString:expectedText];\\\
+        n    BOOL numericMatches = [nodeNumber isKindOfClass:[NSNumber class]] &&\\n                          [number isKindOfClass:[NSNumber\
+        \ class]] &&\\n                          [nodeNumber isEqualToNumber:number];\\n    [trace setObject:(textMatches\
+        \ ? @\"yes\" : @\"no\") forKey:@\"RYDTracePanelTextMatches\"];\\n    [trace setObject:(numericMatches ? @\"yes\" :\
+        \ @\"no\") forKey:@\"RYDTracePanelNumberMatches\"];\\n    BOOL renderPositive = [nodeNumber isKindOfClass:[NSNumber\
+        \ class]] && [nodeNumber doubleValue] > 0;\\n    [trace setObject:(renderPositive ? @\"positive\" : @\"zero / unknown\"\
+        ) forKey:@\"RYDTracePanelRenderValue\"];\\n    // Only forward if the node says it is showing the same callback value.\\\
+        n    // Inconsistency is reported rather than propagating a possibly stale zero.\\n    if (textMatches && numericMatches\
+        \ && [videoId isKindOfClass:[NSString class]] && videoId.length == 11)\\n        rydV105PanelCount(videoId, count,\
+        \ number);\\n    else\\n        [trace setObject:@\"skipped: panel node disagrees with callback\" forKey:@\"RYDTracePanelForwarding\"\
+        ];\\n}\\n\\n// v10.13: A panel update can be followed by YouTube relayout/cell reuse.\\n// Reconcile only already-tagged\
+        \ dislike labels for the exact same video ID.\\n// Never infer video IDs from visible text and never override with\
+        \ zero.\\nstatic void rydV1013ReconcileConfirmed(NSString *videoId, NSString *value) {\\n    if (![NSThread isMainThread]\
+        \ || videoId.length != 11 || value.length == 0) return;\\n    if (![rydV105PanelCounts[videoId] isEqualToString:value])\
+        \ return;\\n    NSUInteger updated = 0;\\n    NSUInteger attached = 0;\\n    for (UIView *view in [rydV104Views allObjects])\
+        \ {\\n        if (![objc_getAssociatedObject(view, &rydV10VideoKey) isEqualToString:videoId]) continue;\\n       \
+        \ UILabel *label = objc_getAssociatedObject(view, &rydV10LabelKey);\\n        if (!label || label.superview != view)\
+        \ continue;\\n        label.text = value;\\n        updated++;\\n        if (view.window != nil) attached++;\\n  \
+        \  }\\n    NSUserDefaults *trace = [NSUserDefaults standardUserDefaults];\\n    [trace setInteger:[trace integerForKey:@\"\
+        RYDV1013Rechecks\"] + 1 forKey:@\"RYDV1013Rechecks\"];\\n    [trace setInteger:(NSInteger)updated forKey:@\"RYDV1013Updated\"\
+        ];\\n    [trace setInteger:(NSInteger)attached forKey:@\"RYDV1013Attached\"];\\n    [trace setObject:(attached ? @\"\
+        visible label updated\" : updated ? @\"offscreen label updated\" : @\"no matching registered label\") forKey:@\"RYDV1013Status\"\
         ];\\n}\\nstatic void rydV105PanelCount(NSString *videoId, NSString *count, NSNumber *number) {\\n    if (![videoId\
         \ isKindOfClass:[NSString class]] || videoId.length != 11 ||\\n        ![count isKindOfClass:[NSString class]] ||\
         \ count.length == 0 ||\\n        ![number isKindOfClass:[NSNumber class]] || [number doubleValue] < 0) return;\\n\
@@ -441,38 +457,40 @@ jobs:
         \   return;\\n    }\\n    if (!rydV105PanelCounts) rydV105PanelCounts = [NSMutableDictionary dictionary];\\n    //\
         \ Limit memory use on long browsing sessions; video IDs are never persisted.\\n    if (rydV105PanelCounts.count >=\
         \ 32 && !rydV105PanelCounts[videoId])\\n        [rydV105PanelCounts removeAllObjects];\\n    NSString *prior = rydV105PanelCounts[videoId];\\\
-        n    if ([number doubleValue] == 0 && prior.length && [prior longLongValue] > 0) return;\\n    rydV105PanelCounts[videoId]\
-        \ = [count copy];\\n    // Only a verified positive panel count is authoritative. Zero may be an\\n    // intermediate\
-        \ placeholder and must not invalidate another value.\\n    if ([number doubleValue] > 0) {\\n        NSString *videoSnapshot\
-        \ = [videoId copy];\\n        NSString *valueSnapshot = [count copy];\\n        rydV1013ReconcileConfirmed(videoSnapshot,\
-        \ valueSnapshot);\\n        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)), dispatch_get_main_queue(),\
-        \ ^{\\n            rydV1013ReconcileConfirmed(videoSnapshot, valueSnapshot);\\n        });\\n        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,\
-        \ (int64_t)(0.8 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{\\n            rydV1013ReconcileConfirmed(videoSnapshot,\
-        \ valueSnapshot);\\n        });\\n    }\\n    NSUserDefaults *trace = [NSUserDefaults standardUserDefaults];\\n  \
-        \  [trace setObject:@\"forwarded after rendering\" forKey:@\"RYDTracePanelForwarding\"];\\n    [trace setInteger:[trace\
-        \ integerForKey:@\"RYDTracePanelStored\"] + 1 forKey:@\"RYDTracePanelStored\"];\\n    [trace setObject:([number doubleValue]\
-        \ > 0 ? @\"nonzero\" : @\"zero\") forKey:@\"RYDTracePanelValue\"];\\n    NSUInteger registeredMatches = 0;\\n    for\
-        \ (UIView *view in [rydV104Views allObjects]) {\\n        NSString *currentId = objc_getAssociatedObject(view, &rydV10VideoKey);\\\
-        n        if (![currentId isEqualToString:videoId]) continue;\\n        UILabel *label = objc_getAssociatedObject(view,\
-        \ &rydV10LabelKey);\\n        if (label && label.superview == view) {\\n            label.text = count;\\n       \
-        \     registeredMatches++;\\n        }\\n    }\\n    NSUInteger remaining = 2500;\\n    NSUInteger liveMatches = 0;\\\
-        n    NSMutableArray<UIWindow *> *sceneWindows = [NSMutableArray array];\\n    for (UIScene *scene in [UIApplication\
-        \ sharedApplication].connectedScenes) {\\n        if ([scene isKindOfClass:[UIWindowScene class]]) {\\n          \
-        \  [sceneWindows addObjectsFromArray:((UIWindowScene *)scene).windows];\\n        }\\n    }\\n    for (UIWindow *window\
-        \ in sceneWindows) {\\n        if (remaining == 0) break;\\n        liveMatches += rydV109ReconcileTree(window, videoId,\
-        \ count, &remaining);\\n    }\\n    // Only counters are kept; video IDs and vote numbers are never logged.\\n   \
-        \ NSUserDefaults *diag = [NSUserDefaults standardUserDefaults];\\n    [diag setInteger:[diag integerForKey:@\"RYDV109PanelCallbacks\"\
-        ] + 1 forKey:@\"RYDV109PanelCallbacks\"];\\n    [diag setInteger:(NSInteger)(registeredMatches + liveMatches) forKey:@\"\
-        RYDV109MatchedLabels\"];\\n    [diag setObject:(registeredMatches + liveMatches > 0 ? @\"yes\" : @\"no\") forKey:@\"\
-        RYDTracePanelReachedView\"];\\n}\\n\\n// v10.6: If the primary action bar receives zero, bypass a potentially stale\\\
-        n// RYD cache exactly once per video until that request completes. The description\\n// panel\\'s final displayed\
-        \ value always takes precedence for the same video ID.\\nstatic NSMutableSet<NSString *> *rydV106Pending;\\nstatic\
-        \ NSMutableDictionary<NSString *, NSString *> *rydV106FreshText;\\nstatic void rydV106RefreshIfZero(NSString *videoId)\
-        \ {\\n    if (![NSThread isMainThread] || ![videoId isKindOfClass:[NSString class]] || videoId.length != 11) return;\\\
-        n    if (rydV105PanelCounts[videoId]) return;\\n    if (!rydV106Pending) rydV106Pending = [NSMutableSet set];\\n \
-        \   if ([rydV106Pending containsObject:videoId]) return;\\n    if (!rydV106FreshText) rydV106FreshText = [NSMutableDictionary\
-        \ dictionary];\\n    if (rydV106FreshText[videoId]) return;\\n    [rydV106Pending addObject:videoId];\\n    getVoteFromVideoWithHandler(nil,\
-        \ videoId, maxRetryCount, ^(NSDictionary *data, NSString *error) {\\n        dispatch_async(dispatch_get_main_queue(),\
+        n    if ([number doubleValue] == 0 && prior.length && [prior longLongValue] > 0) return;\\n    // Once the displayed\
+        \ panel number was confirmed on two frames, later\\n    // stale callbacks must not replace it with their older values.\\\
+        n    NSString *verified = rydV1014VerifiedVisualCounts[videoId];\\n    if (verified.length && ![verified isEqualToString:count])\
+        \ return;\\n    rydV105PanelCounts[videoId] = [count copy];\\n    // Only a verified positive panel count is authoritative.\
+        \ Zero may be an\\n    // intermediate placeholder and must not invalidate another value.\\n    if ([number doubleValue]\
+        \ > 0) {\\n        NSString *videoSnapshot = [videoId copy];\\n        NSString *valueSnapshot = [count copy];\\n\
+        \        rydV1013ReconcileConfirmed(videoSnapshot, valueSnapshot);\\n        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,\
+        \ (int64_t)(0.2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{\\n            rydV1013ReconcileConfirmed(videoSnapshot,\
+        \ valueSnapshot);\\n        });\\n        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.8 * NSEC_PER_SEC)),\
+        \ dispatch_get_main_queue(), ^{\\n            rydV1013ReconcileConfirmed(videoSnapshot, valueSnapshot);\\n       \
+        \ });\\n    }\\n    NSUserDefaults *trace = [NSUserDefaults standardUserDefaults];\\n    [trace setObject:@\"forwarded\
+        \ after rendering\" forKey:@\"RYDTracePanelForwarding\"];\\n    [trace setInteger:[trace integerForKey:@\"RYDTracePanelStored\"\
+        ] + 1 forKey:@\"RYDTracePanelStored\"];\\n    [trace setObject:([number doubleValue] > 0 ? @\"nonzero\" : @\"zero\"\
+        ) forKey:@\"RYDTracePanelValue\"];\\n    NSUInteger registeredMatches = 0;\\n    for (UIView *view in [rydV104Views\
+        \ allObjects]) {\\n        NSString *currentId = objc_getAssociatedObject(view, &rydV10VideoKey);\\n        if (![currentId\
+        \ isEqualToString:videoId]) continue;\\n        UILabel *label = objc_getAssociatedObject(view, &rydV10LabelKey);\\\
+        n        if (label && label.superview == view) {\\n            label.text = count;\\n            registeredMatches++;\\\
+        n        }\\n    }\\n    NSUInteger remaining = 2500;\\n    NSUInteger liveMatches = 0;\\n    NSMutableArray<UIWindow\
+        \ *> *sceneWindows = [NSMutableArray array];\\n    for (UIScene *scene in [UIApplication sharedApplication].connectedScenes)\
+        \ {\\n        if ([scene isKindOfClass:[UIWindowScene class]]) {\\n            [sceneWindows addObjectsFromArray:((UIWindowScene\
+        \ *)scene).windows];\\n        }\\n    }\\n    for (UIWindow *window in sceneWindows) {\\n        if (remaining ==\
+        \ 0) break;\\n        liveMatches += rydV109ReconcileTree(window, videoId, count, &remaining);\\n    }\\n    // Only\
+        \ counters are kept; video IDs and vote numbers are never logged.\\n    NSUserDefaults *diag = [NSUserDefaults standardUserDefaults];\\\
+        n    [diag setInteger:[diag integerForKey:@\"RYDV109PanelCallbacks\"] + 1 forKey:@\"RYDV109PanelCallbacks\"];\\n \
+        \   [diag setInteger:(NSInteger)(registeredMatches + liveMatches) forKey:@\"RYDV109MatchedLabels\"];\\n    [diag setObject:(registeredMatches\
+        \ + liveMatches > 0 ? @\"yes\" : @\"no\") forKey:@\"RYDTracePanelReachedView\"];\\n}\\n\\n// v10.6: If the primary\
+        \ action bar receives zero, bypass a potentially stale\\n// RYD cache exactly once per video until that request completes.\
+        \ The description\\n// panel\\'s final displayed value always takes precedence for the same video ID.\\nstatic NSMutableSet<NSString\
+        \ *> *rydV106Pending;\\nstatic NSMutableDictionary<NSString *, NSString *> *rydV106FreshText;\\nstatic void rydV106RefreshIfZero(NSString\
+        \ *videoId) {\\n    if (![NSThread isMainThread] || ![videoId isKindOfClass:[NSString class]] || videoId.length !=\
+        \ 11) return;\\n    if (rydV105PanelCounts[videoId]) return;\\n    if (!rydV106Pending) rydV106Pending = [NSMutableSet\
+        \ set];\\n    if ([rydV106Pending containsObject:videoId]) return;\\n    if (!rydV106FreshText) rydV106FreshText =\
+        \ [NSMutableDictionary dictionary];\\n    if (rydV106FreshText[videoId]) return;\\n    [rydV106Pending addObject:videoId];\\\
+        n    getVoteFromVideoWithHandler(nil, videoId, maxRetryCount, ^(NSDictionary *data, NSString *error) {\\n        dispatch_async(dispatch_get_main_queue(),\
         \ ^{\\n            // Ignore intermediate errors; API.x may retry, and its final success\\n            // callback\
         \ should be the only source of a committed numeric value.\\n            if (![data isKindOfClass:[NSDictionary class]]\
         \ || error != nil) return;\\n            NSNumber *number = getDislikeData(data);\\n            if (![number isKindOfClass:[NSNumber\
@@ -606,14 +624,15 @@ jobs:
         , @\"RYDTraceActionOutcome\",\n            @\"RYDTracePanelRenderChecks\", @\"RYDTracePanelAfterRender\", @\"RYDTracePanelTextMatches\"\
         ,\n            @\"RYDTracePanelNumberMatches\", @\"RYDTracePanelRenderValue\", @\"RYDTracePanelForwarding\",\n   \
         \         @\"RYDV1012VisualChecks\", @\"RYDV1012VisualStatus\",\n            @\"RYDV1013Rechecks\", @\"RYDV1013Updated\"\
-        , @\"RYDV1013Attached\", @\"RYDV1013Status\"];\n        NSArray *titles = @[@\"패널 최종값 저장 횟수\", @\"패널 값 유형\",\n   \
-        \         @\"패널 콜백 횟수\", @\"갱신한 메인 라벨 수\", @\"패널→메인 도달\",\n            @\"메인 응답 콜백 횟수\", @\"메인 응답 유형\", @\"메인 적용 결과\"\
-        ,\n            @\"패널 렌더링 후 검사 횟수\", @\"패널 렌더링 검사 오류\", @\"패널 텍스트 일치\",\n            @\"패널 숫자 일치\", @\"렌더링 숫자 유형\"\
-        , @\"패널→메인 전달 상태\",\n            @\"v10.12 화면 숫자 검사 횟수\", @\"v10.12 화면 숫자 상태\",\n            @\"v10.13 재확인 횟수\", @\"\
-        갱신된 라벨 수\", @\"화면에 붙은 라벨 수\", @\"v10.13 실제 갱신 상태\"];\n        NSMutableArray *lines = [NSMutableArray array];\n  \
-        \      for (NSUInteger i = 0; i < keys.count; i++) {\n            id value = [d objectForKey:keys[i]];\n         \
-        \   [lines addObject:[NSString stringWithFormat:@\"%@: %@\", titles[i], value ?: @\"기록 없음\"]];\n        }\n      \
-        \  NSString *message = [lines componentsJoinedByString:@\"\\n\"];\n        UIAlertController *alert = [UIAlertController\
+        , @\"RYDV1013Attached\", @\"RYDV1013Status\",\n            @\"RYDV1014VisualStatus\", @\"RYDV1014VisualValidation\"\
+        ];\n        NSArray *titles = @[@\"패널 최종값 저장 횟수\", @\"패널 값 유형\",\n            @\"패널 콜백 횟수\", @\"갱신한 메인 라벨 수\", @\"\
+        패널→메인 도달\",\n            @\"메인 응답 콜백 횟수\", @\"메인 응답 유형\", @\"메인 적용 결과\",\n            @\"패널 렌더링 후 검사 횟수\", @\"패널 렌더링\
+        \ 검사 오류\", @\"패널 텍스트 일치\",\n            @\"패널 숫자 일치\", @\"렌더링 숫자 유형\", @\"패널→메인 전달 상태\",\n            @\"v10.12 화면\
+        \ 숫자 검사 횟수\", @\"v10.12 화면 숫자 상태\",\n            @\"v10.13 재확인 횟수\", @\"갱신된 라벨 수\", @\"화면에 붙은 라벨 수\", @\"v10.13 실제\
+        \ 갱신 상태\",\n            @\"v10.14 화면값 검증\", @\"v10.14 확인 조건\"];\n        NSMutableArray *lines = [NSMutableArray array];\n\
+        \        for (NSUInteger i = 0; i < keys.count; i++) {\n            id value = [d objectForKey:keys[i]];\n       \
+        \     [lines addObject:[NSString stringWithFormat:@\"%@: %@\", titles[i], value ?: @\"기록 없음\"]];\n        }\n    \
+        \    NSString *message = [lines componentsJoinedByString:@\"\\n\"];\n        UIAlertController *alert = [UIAlertController\
         \ alertControllerWithTitle:@\"RYD 숫자 전달 진단\"\n            message:message preferredStyle:UIAlertControllerStyleAlert];\n\
         \        [alert addAction:[UIAlertAction actionWithTitle:@\"복사\" style:UIAlertActionStyleDefault handler:^(UIAlertAction\
         \ *a) {\n            [UIPasteboard generalPasteboard].string = message;\n        }]];\n        [alert addAction:[UIAlertAction\
@@ -638,7 +657,7 @@ jobs:
         \ valueForKey:@\"rollingNumberView\"]'\nif stale in t:\n    sys.exit('RYD v10.12.2: stale direct selector call found')\n\
         if t.count(corrected) != 1:\n    sys.exit(f'RYD v10.12.2: expected one dynamic rolling view lookup, found {t.count(corrected)}')\n\
         settings.write_text(contents)\napi.write_text(a)\ntweak.write_text(t)\nif stale in tweak.read_text() or corrected\
-        \ not in tweak.read_text():\n    sys.exit('RYD v10.12.2: written source failed verification')\nprint('RYD V10.13 SOURCE\
+        \ not in tweak.read_text():\n    sys.exit('RYD v10.12.2: written source failed verification')\nprint('RYD V10.14 SOURCE\
         \ VERIFIED: dynamic rolling-number lookup; no direct selector call')\nprint('RYD v10.12 checks rendered UILabels only\
         \ in dislike panel node')\nprint('RYD privacy-safe diagnostics enabled: API status, callback, shorts hook, video hook')\n\
         PY_RYD_DIAGNOSTIC\n  fi\n  if [[ \"$key\" == donteatmycontent ]]; then\n    python3 - \"$out\" <<'PY_PATCH'\nfrom\
