@@ -1,4 +1,4 @@
-name: IPA (YTKACE + RYD v10.15 Clean Settings)
+name: IPA (YTKACE + RYD)
 on:
   workflow_dispatch:
     inputs:
