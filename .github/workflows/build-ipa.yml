@@ -11,7 +11,7 @@ name: IPA (YTKACE built-in RYD for Shorts/details + v10.17 main counts 30s)
         description: 'Official YTKACE release: latest or tag (e.g. v1.1.7)'
         required: true
         type: string
-        default: latest
+        default: v1.1.8
       add_ryd:
         description: 'Extra RYD: regular-video button counts, 30s refresh (default ON)'
         type: boolean
@@ -76,6 +76,86 @@ jobs:
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: bash -c "$(curl -fsSL https://raw.githubusercontent.com/roothide/theos/master/bin/install-theos)"
+    - name: Preserve native Mix playlist visibility (v1.1.8)
+      if: ${{ steps.ytkace_release.outputs.tag == 'v1.1.8' }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        cd upstream-ytkace
+        cat > /tmp/ytkace-mix-keep.patch <<'MIX_PATCH'
+        --- a/Tweak/Features/Queue/QueueHooks.mm
+        +++ b/Tweak/Features/Queue/QueueHooks.mm
+        @@ -1715,13 +1715,33 @@
+                 actionEnabled, loopMode, renderer, useRendererSaveIcons);
+         }
+         
+        +// Preserve a real native Mix panel, not the local YTKACE queue.
+        +// Do not fabricate a playlist or reuse a renderer from another video.
+        +static BOOL YTKACEMixPanelHasContents(id receiver) {
+        +    @try {
+        +        id panel = [receiver valueForKey:@"playlistPanelRenderer"];
+        +        if (![panel isKindOfClass:NSClassFromString(@"YTIPlaylistPanelRenderer")]) return NO;
+        +        id owner = [panel valueForKey:@"playlistId"];
+        +        if (![owner isKindOfClass:NSString.class] || ![owner hasPrefix:@"RD"]) return NO;
+        +        id entries = [panel valueForKey:@"contentsArray"];
+        +        if (![entries isKindOfClass:NSArray.class]) return NO;
+        +        for (id entry in entries) {
+        +            id video = YTKACEQueueValue(entry, @[@"playlistPanelVideoRenderer"]);
+        +            id videoID = YTKACEQueueValue(video, @[@"videoId"]);
+        +            if ([videoID isKindOfClass:NSString.class] && [videoID length] != 0) return YES;
+        +        }
+        +    } @catch (__unused NSException *exception) {}
+        +    return NO;
+        +}
+        +
+         static BOOL YTKACEQueueShouldShowPlaylist(id receiver, SEL selector) {
+             if (YTKACEQueuePanelController != receiver) {
+                 YTKACEQueuePanelController = receiver;
+             }
+             if (YTKACEQueueIsActive()) return YES;
+        -    if (OriginalShouldShowPlaylist == NULL) return NO;
+        -    return ((BOOL (*)(id, SEL))OriginalShouldShowPlaylist)(receiver, selector);
+        +    BOOL original = OriginalShouldShowPlaylist != NULL &&
+        +        ((BOOL (*)(id, SEL))OriginalShouldShowPlaylist)(receiver, selector);
+        +    return original || YTKACEMixPanelHasContents(receiver);
+         }
+         
+         static void YTKACEQueueDidTapShuffle(id receiver, SEL selector) {
+        @@ -2026,8 +2046,9 @@
+                 YTKACEQueuePanelController = receiver;
+             }
+             if (YTKACEQueueIsActive()) return YES;
+        -    if (OriginalHasQueueContents == NULL) return NO;
+        -    return ((BOOL (*)(id, SEL))OriginalHasQueueContents)(receiver, selector);
+        +    BOOL original = OriginalHasQueueContents != NULL &&
+        +        ((BOOL (*)(id, SEL))OriginalHasQueueContents)(receiver, selector);
+        +    return original || YTKACEMixPanelHasContents(receiver);
+         }
+         
+         // Whether the player is on a live stream. At the live edge the playback time
+        @@ -2607,13 +2628,12 @@
+                 (IMP)YTKACEQueuePanelByline, &OriginalPanelByline);
+             YTKACEInstallInstanceHook(@"YTPlaylistPanelController", @"isQueue",
+                 (IMP)YTKACEQueueIsQueue, &OriginalIsQueue);
+        -    if (!YTKACEInstallInstanceHook(@"YTPlaylistPanelController",
+        +    YTKACEInstallInstanceHook(@"YTPlaylistPanelController",
+                 @"hasQueueContents", (IMP)YTKACEQueueHasContents,
+        -        &OriginalHasQueueContents)) {
+        -        YTKACEInstallInstanceHook(@"YTPlaylistPanelController",
+        -            @"shouldShowPlaylist", (IMP)YTKACEQueueShouldShowPlaylist,
+        -            &OriginalShouldShowPlaylist);
+        -    }
+        +        &OriginalHasQueueContents);
+        +    YTKACEInstallInstanceHook(@"YTPlaylistPanelController",
+        +        @"shouldShowPlaylist", (IMP)YTKACEQueueShouldShowPlaylist,
+        +        &OriginalShouldShowPlaylist);
+             YTKACEInstallInstanceHook(@"YTQueueController",
+                 @"moveItemAtIndexPath:toIndexPath:userTriggered:",
+                 (IMP)YTKACEQueueMoveItem, &OriginalMoveItem);
+        MIX_PATCH
+        git apply --check /tmp/ytkace-mix-keep.patch
+        git apply /tmp/ytkace-mix-keep.patch
+        git diff --stat
     - name: Build YTKACE Rootless DEB and extract shipped library
       shell: bash
       run: "set -euo pipefail\n# Theos installer can leave incompatible Clang precompiled modules.\n# Isolate this\
@@ -131,7 +211,7 @@ jobs:
 
         version="$(cat built-ytkace/ytkace-version.txt)"
 
-        [[ "$tag" =~ ^v[0-9]+\.[0-9]+\ .[0-9]+$ ]]
+        [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
 
         test -n "$version"
 
