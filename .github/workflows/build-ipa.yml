@@ -72,43 +72,48 @@ jobs:
         ref: ${{ steps.ytkace_release.outputs.tag }}
         path: upstream-ytkace
         submodules: recursive
-    - name: Index playlist/queue/mix source references (read-only)
+    - name: Audit YTKACE settings and playlist implementation (read-only)
       shell: bash
       run: |
         set -euo pipefail
         mkdir -p diagnostics
-        python3 - <<'PY_PLAYLIST_INDEX'
+        python3 - <<'PY_SETTINGS_AUDIT'
         from pathlib import Path
         import re
-
         root = Path('upstream-ytkace')
-        report = Path('diagnostics/playlist-source-index.txt')
-        words = re.compile(r'playlist|queue|remove.?mix|hide.?mix|mixes|up.?next|next.?video|dismiss|pan.?gesture', re.I)
+        out = Path('diagnostics/ytkace-settings-playlist-audit.txt')
+        tokens = {
+          'settings_store': re.compile(r'NSUserDefaults|CFPreferences|setBool:|setObject:|registerDefaults|synchronize', re.I),
+          'settings_change': re.compile(r'addTarget:|valueChanged|switchChanged|didSelect|setOn:|settings', re.I),
+          'playlist': re.compile(r'playlist|up.?next|next.?video|autoplay|watch.?next', re.I),
+          'queue': re.compile(r'queue|play.?next|play.?last', re.I),
+          'mix_hide': re.compile(r'remove.?mix|hide.?mix|mixes|mix.?hide', re.I),
+          'ui_lifecycle': re.compile(r'viewDidAppear|viewWillAppear|viewDidDisappear|reloadData|setHidden:|dismiss|presentViewController', re.I),
+        }
         extensions = {'.xm', '.x', '.m', '.mm', '.h', '.swift', '.plist'}
-        count = 0
-        with report.open('w', encoding='utf-8') as output:
-            output.write('Read-only YTKACE source index (not a fix or proof of root cause)\n')
-            for file in sorted(root.rglob('*')):
-                if not file.is_file() or file.suffix.lower() not in extensions:
-                    continue
-                if any(segment in {'Vendor', '.git', 'packages', '.theos'} for segment in file.parts):
-                    continue
-                try:
-                    lines = file.read_text(encoding='utf-8', errors='replace').splitlines()
-                except OSError:
-                    continue
-                for number, line in enumerate(lines, 1):
-                    hits = sorted(set(x.lower() for x in words.findall(line)))
-                    if hits:
-                        output.write(f'{file.relative_to(root)}:{number} : {", ".join(hits)}\n')
-                        count += 1
-            output.write(f'Total matching lines: {count}\n')
-        print(f'Read-only source index created ({count} matched lines).')
-        PY_PLAYLIST_INDEX
+        counts = {name: 0 for name in tokens}
+        with out.open('w', encoding='utf-8') as f:
+          f.write('YTKACE read-only source audit. No application code is changed.\n')
+          for file in sorted(root.rglob('*')):
+            if not file.is_file() or file.suffix.lower() not in extensions:
+              continue
+            if any(part in {'.git', '.theos', 'packages', 'Vendor'} for part in file.parts):
+              continue
+            for number, line in enumerate(file.read_text(encoding='utf-8', errors='replace').splitlines(), 1):
+              matched = [name for name, pattern in tokens.items() if pattern.search(line)]
+              if not matched:
+                continue
+              for name in matched:
+                counts[name] += 1
+              # Do not include arbitrary source lines or user-derived values in audit artifact.
+              f.write(f'{file.relative_to(root)}:{number} [{", ".join(matched)}]\n')
+          f.write('\nCounts: ' + ', '.join(f'{k}={v}' for k,v in counts.items()) + '\n')
+        print('Read-only settings/playlist audit generated:', out)
+        PY_SETTINGS_AUDIT
     - uses: actions/upload-artifact@v7
       with:
-        name: YTKACE-playlist-source-index
-        path: diagnostics/playlist-source-index.txt
+        name: YTKACE-settings-playlist-audit
+        path: diagnostics/ytkace-settings-playlist-audit.txt
         if-no-files-found: error
     - name: Install Theos
       env:
