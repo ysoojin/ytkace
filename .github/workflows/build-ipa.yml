@@ -72,6 +72,44 @@ jobs:
         ref: ${{ steps.ytkace_release.outputs.tag }}
         path: upstream-ytkace
         submodules: recursive
+    - name: Index playlist/queue/mix source references (read-only)
+      shell: bash
+      run: |
+        set -euo pipefail
+        mkdir -p diagnostics
+        python3 - <<'PY_PLAYLIST_INDEX'
+        from pathlib import Path
+        import re
+
+        root = Path('upstream-ytkace')
+        report = Path('diagnostics/playlist-source-index.txt')
+        words = re.compile(r'playlist|queue|remove.?mix|hide.?mix|mixes|up.?next|next.?video|dismiss|pan.?gesture', re.I)
+        extensions = {'.xm', '.x', '.m', '.mm', '.h', '.swift', '.plist'}
+        count = 0
+        with report.open('w', encoding='utf-8') as output:
+            output.write('Read-only YTKACE source index (not a fix or proof of root cause)\n')
+            for file in sorted(root.rglob('*')):
+                if not file.is_file() or file.suffix.lower() not in extensions:
+                    continue
+                if any(segment in {'Vendor', '.git', 'packages', '.theos'} for segment in file.parts):
+                    continue
+                try:
+                    lines = file.read_text(encoding='utf-8', errors='replace').splitlines()
+                except OSError:
+                    continue
+                for number, line in enumerate(lines, 1):
+                    hits = sorted(set(x.lower() for x in words.findall(line)))
+                    if hits:
+                        output.write(f'{file.relative_to(root)}:{number} : {", ".join(hits)}\n')
+                        count += 1
+            output.write(f'Total matching lines: {count}\n')
+        print(f'Read-only source index created ({count} matched lines).')
+        PY_PLAYLIST_INDEX
+    - uses: actions/upload-artifact@v7
+      with:
+        name: YTKACE-playlist-source-index
+        path: diagnostics/playlist-source-index.txt
+        if-no-files-found: error
     - name: Install Theos
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
