@@ -72,49 +72,70 @@ jobs:
         ref: ${{ steps.ytkace_release.outputs.tag }}
         path: upstream-ytkace
         submodules: recursive
-    - name: Audit YTKACE settings and playlist implementation (read-only)
+    - name: Guarded YTKACE playlist-panel experiment (1.1.8 only)
       shell: bash
+      env:
+        PATCH_YTKACE_TAG: ${{ steps.ytkace_release.outputs.tag }}
       run: |
         set -euo pipefail
-        mkdir -p diagnostics
-        python3 - <<'PY_SETTINGS_AUDIT'
+        python3 - <<'PY_PLAYLIST_GUARD'
         from pathlib import Path
+        import os
+        import sys
+        import difflib
         import re
-        root = Path('upstream-ytkace')
-        out = Path('diagnostics/ytkace-settings-playlist-audit.txt')
-        tokens = {
-          'settings_store': re.compile(r'NSUserDefaults|CFPreferences|setBool:|setObject:|registerDefaults|synchronize', re.I),
-          'settings_change': re.compile(r'addTarget:|valueChanged|switchChanged|didSelect|setOn:|settings', re.I),
-          'playlist': re.compile(r'playlist|up.?next|next.?video|autoplay|watch.?next', re.I),
-          'queue': re.compile(r'queue|play.?next|play.?last', re.I),
-          'mix_hide': re.compile(r'remove.?mix|hide.?mix|mixes|mix.?hide', re.I),
-          'ui_lifecycle': re.compile(r'viewDidAppear|viewWillAppear|viewDidDisappear|reloadData|setHidden:|dismiss|presentViewController', re.I),
+
+        tag = os.environ.get('PATCH_YTKACE_TAG', '')
+        if tag != 'v1.1.8':
+            sys.exit(f'Patch requires v1.1.8; set workflow input ytkace_ref=v1.1.8 (received {tag!r})')
+        path = Path('upstream-ytkace/Tweak/Features/Queue/QueueHooks.mm')
+        if not path.is_file():
+            sys.exit(f'Expected YTKACE 1.1.8 source not found: {path}')
+        source = path.read_text()
+        old = '''    if (YTKACEQueueIsActive()) return YES;
+            if (OriginalShouldShowPlaylist == NULL) return NO;
+            return ((BOOL (*)(id, SEL))OriginalShouldShowPlaylist)(receiver, selector);
         }
-        extensions = {'.xm', '.x', '.m', '.mm', '.h', '.swift', '.plist'}
-        counts = {name: 0 for name in tokens}
-        with out.open('w', encoding='utf-8') as f:
-          f.write('YTKACE read-only source audit. No application code is changed.\n')
-          for file in sorted(root.rglob('*')):
-            if not file.is_file() or file.suffix.lower() not in extensions:
-              continue
-            if any(part in {'.git', '.theos', 'packages', 'Vendor'} for part in file.parts):
-              continue
-            for number, line in enumerate(file.read_text(encoding='utf-8', errors='replace').splitlines(), 1):
-              matched = [name for name, pattern in tokens.items() if pattern.search(line)]
-              if not matched:
-                continue
-              for name in matched:
-                counts[name] += 1
-              # Do not include arbitrary source lines or user-derived values in audit artifact.
-              f.write(f'{file.relative_to(root)}:{number} [{", ".join(matched)}]\n')
-          f.write('\nCounts: ' + ', '.join(f'{k}={v}' for k,v in counts.items()) + '\n')
-        print('Read-only settings/playlist audit generated:', out)
-        PY_SETTINGS_AUDIT
-    - uses: actions/upload-artifact@v7
-      with:
-        name: YTKACE-settings-playlist-audit
-        path: diagnostics/ytkace-settings-playlist-audit.txt
-        if-no-files-found: error
+        static void YTKACEQueueDidTapShuffle'''
+        new = '''    if (YTKACEQueueIsActive()) return YES;
+            if (OriginalShouldShowPlaylist == NULL) return NO;
+            BOOL originalDecision = ((BOOL (*)(id, SEL))OriginalShouldShowPlaylist)(receiver, selector);
+            if (originalDecision) return YES;
+
+            // Experimental: only override hidden state for an already populated
+            // native playlist panel; do not change custom queue semantics.
+            id panel = nil;
+            id collection = nil;
+            @try {
+                panel = [receiver valueForKey:@"playlistPanelCollectionViewController"];
+                if (panel) collection = [panel valueForKey:@"collectionView"];
+            } @catch (__unused NSException *exception) {
+                return NO;
+            }
+            if (![collection isKindOfClass:[UICollectionView class]]) return NO;
+            UICollectionView *list = (UICollectionView *)collection;
+            NSInteger sectionCount = [list numberOfSections];
+            if (sectionCount < 1 || sectionCount > 16) return NO;
+            for (NSInteger section = 0; section < sectionCount; section++) {
+                if ([list numberOfItemsInSection:section] > 0) return YES;
+            }
+            return NO;
+        }
+        static void YTKACEQueueDidTapShuffle'''
+        # Require exact source match. Never insert hooks into an unknown version.
+        pattern = re.compile(r'\s+'.join(re.escape(part) for part in old.split()))
+        matches = list(pattern.finditer(source))
+        if len(matches) != 1:
+            print('Source did not match assumed 1.1.8 code; no edits applied.', file=sys.stderr)
+            sys.exit('Aborted safely: cannot verify playlist hook source. No IPA produced.')
+        match = matches[0]
+        patched = source[:match.start()] + new + source[match.end():]
+        path.write_text(patched)
+        print('Applied precisely one experimental playlist-panel patch to:', path)
+        print(''.join(difflib.unified_diff(source.splitlines(True), patched.splitlines(True),
+                                           fromfile='original/QueueHooks.mm',
+                                           tofile='patched/QueueHooks.mm')))
+        PY_PLAYLIST_GUARD
     - name: Install Theos
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
