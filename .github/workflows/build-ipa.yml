@@ -632,6 +632,247 @@ jobs:
         AUDIT_V3
         git -C upstream-ytkace apply --check "$RUNNER_TEMP/mix-audit-v3.patch"
         git -C upstream-ytkace apply "$RUNNER_TEMP/mix-audit-v3.patch"
+    - name: Repair native Mix collapse once after actual hide (v4)
+      shell: bash
+      run: |
+        set -euo pipefail
+        cat > "$RUNNER_TEMP/mix-collapse-v4.patch" <<'MIX_COLLAPSE_V4'
+        --- a/Tweak/Features/Queue/QueueHooks.mm
+        +++ b/Tweak/Features/Queue/QueueHooks.mm
+        @@ -54,13 +54,13 @@
+         void YTKACEMixAudit(NSString *event) {
+             @synchronized (YTKACEMixAuditLock()) {
+                 if (!YTKACEMixAuditEvents) {
+        -            NSArray *saved = [NSUserDefaults.standardUserDefaults arrayForKey:@"YTKACE.MixAudit.V3.Events"];
+        +            NSArray *saved = [NSUserDefaults.standardUserDefaults arrayForKey:@"YTKACE.MixAudit.V4.Events"];
+                     YTKACEMixAuditEvents = saved ? [saved mutableCopy] : [NSMutableArray new];
+        -            [YTKACEMixAuditEvents addObject:@"--- mix audit v3 / new process ---"];
+        +            [YTKACEMixAuditEvents addObject:@"--- mix collapse repair v4 / new process ---"];
+                 }
+                 while (YTKACEMixAuditEvents.count >= 320) [YTKACEMixAuditEvents removeObjectAtIndex:0];
+                 [YTKACEMixAuditEvents addObject:[NSString stringWithFormat:@"%.2f %@", NSProcessInfo.processInfo.systemUptime, event]];
+        -        [NSUserDefaults.standardUserDefaults setObject:[YTKACEMixAuditEvents copy] forKey:@"YTKACE.MixAudit.V3.Events"];
+        +        [NSUserDefaults.standardUserDefaults setObject:[YTKACEMixAuditEvents copy] forKey:@"YTKACE.MixAudit.V4.Events"];
+             }
+         }
+         NSString *YTKACEMixAuditText(void) {
+        @@ -115,8 +115,10 @@
+                 response ? @"live" : @"last-sample", response ? MixAuditSample(response) : (MixAuditLastSample ?: @"no watch response"),
+                 YTKACEFeatureEnabled(@"YTKACE.Preference.Playback.AutoplayDisabled")];
+         }
+        +static void MixRepairCancel(void);
+         static void MixAuditRecordWatchResponse(id response) {
+             if (![NSThread isMainThread]) { YTKACEMixAudit(@"watch response off-main (state not read)"); return; }
+        +    MixRepairCancel();
+             ++MixAuditResponseSequence;
+             MixAuditWatchResponse = response;
+             MixAuditLastSample = MixAuditSample(response);
+        @@ -124,6 +126,11 @@
+         }
+         
+         static IMP MixAuditShowOriginal, MixAuditHideOriginal;
+        +// Repair only a real native Mix after a playlist-specific downward gesture
+        +// and an actual hide request. No playback timer, response injection or reload.
+        +static void MixRepairAfterHide(id watch);
+        +static BOOL MixRepairQueueDecision(id panelController);
+        +static void MixRepairObservePanel(id panelController);
+         static void MixAuditShow(id receiver, SEL selector) {
+             YTKACEMixAudit([@"mini show before " stringByAppendingString:YTKACEMixAuditCurrentState()]);
+             ((void (*)(id, SEL))MixAuditShowOriginal)(receiver, selector);
+        @@ -145,6 +152,7 @@
+             YTKACEMixAudit([@"hide callers " stringByAppendingString:[callers componentsJoinedByString:@" | "]]);
+             ((void (*)(id, SEL))MixAuditHideOriginal)(receiver, selector);
+             YTKACEMixAudit([@"mini hide after " stringByAppendingString:YTKACEMixAuditCurrentState()]);
+        +    MixRepairAfterHide(receiver);
+         }
+         static void MixAuditInstallVoid(NSString *name, IMP replacement, IMP *original) {
+             Method m = class_getInstanceMethod(NSClassFromString(@"YTWatchViewController"), NSSelectorFromString(name));
+        @@ -911,6 +919,135 @@
+             return controller.isViewLoaded && controller.view.window != nil;
+         }
+         
+        +
+        +// All repair state is main-thread only and in-memory. IDs are never logged.
+        +static __weak id MixRepairWatch;
+        +static __weak id MixRepairResponse;
+        +static __weak id MixRepairPanel;
+        +static NSUInteger MixRepairPanelSequence;
+        +static NSUInteger MixRepairGeneration;
+        +static NSUInteger MixRepairSequence;
+        +static NSTimeInterval MixRepairDeadline;
+        +static BOOL MixRepairArmed, MixRepairScheduled, MixRepairInShow;
+        +static NSString *MixRepairVideo;
+        +
+        +static void MixRepairCancel(void) {
+        +    if (!NSThread.isMainThread) return;
+        +    ++MixRepairGeneration;
+        +    MixRepairArmed = NO;
+        +    MixRepairScheduled = NO;
+        +    MixRepairWatch = nil;
+        +    MixRepairResponse = nil;
+        +    MixRepairVideo = nil;
+        +    MixRepairPanel = nil;
+        +    MixRepairPanelSequence = 0;
+        +}
+        +
+        +// Use exactly the live response fields confirmed by audit v3. Require the
+        +// panel and the current endpoint to identify the same RD playlist.
+        +static NSString *MixRepairLiveVideo(void) {
+        +    id response = MixAuditWatchResponse;
+        +    if (!response) return nil;
+        +    id single = MixAuditRead(MixAuditRead(response, @"contents"), @"singleColumnWatchNextResults");
+        +    id wrapper = MixAuditRead(single, @"playlist");
+        +    Class panelClass = NSClassFromString(@"YTIPlaylistPanelRenderer");
+        +    if (!panelClass) return nil;
+        +    id panel = MixAuditRead(wrapper, @"playlist");
+        +    if (![panel isKindOfClass:panelClass] && [wrapper isKindOfClass:panelClass]) panel = wrapper;
+        +    if (![panel isKindOfClass:panelClass]) return nil;
+        +    id pid = MixAuditRead(panel, @"playlistId");
+        +    id items = MixAuditRead(panel, @"contentsArray");
+        +    id endpoint = MixAuditRead(MixAuditRead(response, @"currentVideoEndpoint"), @"watchEndpoint");
+        +    id endpointPID = MixAuditRead(endpoint, @"playlistId");
+        +    id video = MixAuditRead(endpoint, @"videoId");
+        +    if (![pid isKindOfClass:NSString.class] || ![pid hasPrefix:@"RD"] ||
+        +        ![pid isEqual:endpointPID] || ![items isKindOfClass:NSArray.class] || [items count] == 0 ||
+        +        ![video isKindOfClass:NSString.class] || [video length] != 11) return nil;
+        +    id playing = YTKACEQueueValue(YTKACEQueuePlayerViewController, @[@"currentVideoID", @"contentVideoID"]);
+        +    return [video isEqual:playing] ? video : nil;
+        +}
+        +
+        +static BOOL MixRepairSameContext(id watch) {
+        +    return NSThread.isMainThread && watch && watch == MixRepairWatch &&
+        +        watch == YTKACEQueueWatchViewController &&
+        +        MixRepairResponse && MixRepairResponse == MixAuditWatchResponse &&
+        +        MixRepairSequence == MixAuditResponseSequence && MixRepairVideo.length != 0 &&
+        +        [MixRepairVideo isEqual:MixRepairLiveVideo()] &&
+        +        YTKACEQueueViewOnScreen(watch) && !YTKACEQueueIsActive() &&
+        +        UIApplication.sharedApplication.applicationState == UIApplicationStateActive;
+        +}
+        +
+        +// Called before the original touch dispatch. Scrolling alone does nothing;
+        +// a subsequent native hide request for this exact response is also required.
+        +void YTKACEMixRepairArm(void) {
+        +    if (!NSThread.isMainThread || MixRepairInShow) return;
+        +    id watch = YTKACEQueueWatchViewController;
+        +    NSString *video = MixRepairLiveVideo();
+        +    if (!watch || !video || !YTKACEQueueViewOnScreen(watch) || YTKACEQueueIsActive()) {
+        +        YTKACEMixAudit(@"collapse repair not armed (no matching live native Mix)");
+        +        return;
+        +    }
+        +    ++MixRepairGeneration;
+        +    MixRepairWatch = watch;
+        +    MixRepairResponse = MixAuditWatchResponse;
+        +    MixRepairSequence = MixAuditResponseSequence;
+        +    MixRepairVideo = [video copy];
+        +    MixRepairDeadline = NSProcessInfo.processInfo.systemUptime + 5.0;
+        +    MixRepairArmed = YES;
+        +    MixRepairScheduled = NO;
+        +    YTKACEMixAudit(@"collapse repair armed");
+        +}
+        +
+        +static void MixRepairObservePanel(id panelController) {
+        +    if (!NSThread.isMainThread || MixRepairInShow) return;
+        +    if (MixAuditWatchResponse && panelController) {
+        +        MixRepairPanel = panelController;
+        +        MixRepairPanelSequence = MixAuditResponseSequence;
+        +    }
+        +}
+        +
+        +// Do not change the normal queue predicate. A single native show invocation
+        +// may synchronously consult this exact panel; only then may a real Mix count
+        +// as present. This is an experimental UI-only override, never saved.
+        +static BOOL MixRepairQueueDecision(id panelController) {
+        +    return NSThread.isMainThread && MixRepairInShow && panelController &&
+        +        panelController == MixRepairPanel && MixRepairPanelSequence == MixRepairSequence &&
+        +        MixRepairSameContext(MixRepairWatch);
+        +}
+        +
+        +static void MixRepairAfterHide(id watch) {
+        +    if (!NSThread.isMainThread || !MixRepairArmed || MixRepairInShow ||
+        +        NSProcessInfo.processInfo.systemUptime > MixRepairDeadline ||
+        +        !MixRepairSameContext(watch) || !MixAuditShowOriginal) return;
+        +    // The log shows two hide requests about 0.15-0.20 seconds apart.
+        +    // Debounce this pair; make at most one show attempt per gesture.
+        +    NSUInteger token = ++MixRepairGeneration;
+        +    MixRepairScheduled = YES;
+        +    __weak id weakWatch = watch;
+        +    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.40 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        +        if (!MixRepairArmed || !MixRepairScheduled || token != MixRepairGeneration) return;
+        +        MixRepairArmed = NO;
+        +        MixRepairScheduled = NO;
+        +        id currentWatch = weakWatch;
+        +        if (!MixRepairSameContext(currentWatch) ||
+        +            NSProcessInfo.processInfo.systemUptime > MixRepairDeadline + 0.50) {
+        +            YTKACEMixAudit(@"collapse repair cancelled (context changed)");
+        +            return;
+        +        }
+        +        YTKACEMixAudit(@"collapse repair one native show attempt");
+        +        MixRepairInShow = YES;
+        +        @try {
+        +            // Use the existing native function, never refresh or replace the data.
+        +            MixAuditShow(currentWatch, @selector(showPlaylistMiniBarIfNeeded));
+        +        } @catch (__unused NSException *exception) {
+        +            YTKACEMixAudit(@"collapse repair native show raised exception");
+        +        } @finally {
+        +            MixRepairInShow = NO;
+        +        }
+        +        YTKACEMixAudit(@"collapse repair attempt finished (visibility not asserted)");
+        +    });
+        +}
+        +
+         static NSString *YTKACEQueueDescribeHost(id candidate) {
+             if (candidate == nil) return @"nil";
+             if (![candidate isKindOfClass:UIViewController.class]) {
+        @@ -1837,6 +1974,11 @@
+             }
+             BOOL active = YTKACEQueueIsActive();
+             BOOL result = active ? YES : (OriginalShouldShowPlaylist != NULL ? ((BOOL (*)(id, SEL))OriginalShouldShowPlaylist)(receiver, selector) : NO);
+        +    MixRepairObservePanel(receiver);
+        +    if (!result && MixRepairQueueDecision(receiver)) {
+        +        YTKACEMixAudit(@"collapse repair scoped queue decision=1 (native show only)");
+        +        result = YES;
+        +    }
+             YTKACEMixAudit([NSString stringWithFormat:@"%@ result=%d local=%d %@", NSStringFromSelector(selector), result, active, YTKACEMixAuditCurrentState()]);
+             return result;
+         }
+        @@ -2144,6 +2286,11 @@
+             }
+             BOOL active = YTKACEQueueIsActive();
+             BOOL result = active ? YES : (OriginalHasQueueContents != NULL ? ((BOOL (*)(id, SEL))OriginalHasQueueContents)(receiver, selector) : NO);
+        +    MixRepairObservePanel(receiver);
+        +    if (!result && MixRepairQueueDecision(receiver)) {
+        +        YTKACEMixAudit(@"collapse repair scoped queue decision=1 (native show only)");
+        +        result = YES;
+        +    }
+             YTKACEMixAudit([NSString stringWithFormat:@"%@ result=%d local=%d %@", NSStringFromSelector(selector), result, active, YTKACEMixAuditCurrentState()]);
+             return result;
+         }
+        --- a/Tweak/Features/Playback/AutoplayControls.mm
+        +++ b/Tweak/Features/Playback/AutoplayControls.mm
+        @@ -123,6 +123,7 @@
+         // A downward swipe marker is a candidate, not proof of an actual sheet dismissal.
+         extern void YTKACEMixAudit(NSString *event);
+         extern NSString *YTKACEMixAuditCurrentState(void);
+        +extern void YTKACEMixRepairArm(void);
+         static __weak UITouch *MixAuditTouch;
+         static CGPoint MixAuditTouchStart;
+         static BOOL MixAuditDownMarked;
+        @@ -167,7 +168,11 @@
+             }
+             if (touch.phase != UITouchPhaseEnded) return NO;
+             BOOL marked = MixAuditDownMarked;
+        -    if (marked) YTKACEMixAudit([NSString stringWithFormat:@"downward gesture end-before-dispatch scope=%@ %@", MixAuditTouchScope, YTKACEMixAuditCurrentState()]);
+        +    if (marked) {
+        +        YTKACEMixAudit([NSString stringWithFormat:@"downward gesture end-before-dispatch scope=%@ %@", MixAuditTouchScope, YTKACEMixAuditCurrentState()]);
+        +        if ([MixAuditTouchScope isEqualToString:@"playlist-view"] ||
+        +            [MixAuditTouchScope isEqualToString:@"playlist-controller"]) YTKACEMixRepairArm();
+        +    }
+             MixAuditTouch = nil; MixAuditTouchScope = nil;
+             return marked;
+         }
+        MIX_COLLAPSE_V4
+        git -C upstream-ytkace apply --check "$RUNNER_TEMP/mix-collapse-v4.patch"
+        git -C upstream-ytkace apply "$RUNNER_TEMP/mix-collapse-v4.patch"
     - name: Install Theos
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
