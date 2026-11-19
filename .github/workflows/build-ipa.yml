@@ -72,81 +72,182 @@ jobs:
         ref: ${{ steps.ytkace_release.outputs.tag }}
         path: upstream-ytkace
         submodules: recursive
+    - name: Apply mix runtime audit (no playback changes)
+      shell: bash
+      run: |
+        set -euo pipefail
+        test "${{ steps.ytkace_release.outputs.tag }}" = v1.1.8
+        cat > "$RUNNER_TEMP/mix-runtime-audit.patch" <<'MIX_AUDIT_PATCH'
+        --- a/Tweak/Features/Queue/QueueHooks.mm
+        +++ b/Tweak/Features/Queue/QueueHooks.mm
+        @@ -41,6 +41,53 @@
+         static void YTKACEQueueApplyLoopMode(id controller, long long mode);
+         static void YTKACEQueueAppendToController(NSDictionary *entry,
+                                                   NSUInteger insertIndex);
+        +
+        +
+        +// Mix runtime audit: bounded, session-only, no content IDs, no UI changes.
+        +static NSMutableArray<NSString *> *YTKACEMixAuditEvents;
+        +static NSObject *YTKACEMixAuditLock(void) {
+        +    static NSObject *lock; static dispatch_once_t once;
+        +    dispatch_once(&once, ^{ lock = [NSObject new]; }); return lock;
+        +}
+        +static void YTKACEMixAudit(NSString *event) {
+        +    @synchronized (YTKACEMixAuditLock()) {
+        +        if (!YTKACEMixAuditEvents) YTKACEMixAuditEvents = [NSMutableArray new];
+        +        if (YTKACEMixAuditEvents.count >= 160) [YTKACEMixAuditEvents removeObjectAtIndex:0];
+        +        [YTKACEMixAuditEvents addObject:[NSString stringWithFormat:@"%.2f %@", NSProcessInfo.processInfo.systemUptime, event]];
+        +    }
+        +}
+        +NSString *YTKACEMixAuditText(void) {
+        +    @synchronized (YTKACEMixAuditLock()) {
+        +        return YTKACEMixAuditEvents.count ? [YTKACEMixAuditEvents componentsJoinedByString:@"\n"] : @"No events yet";
+        +    }
+        +}
+        +static void YTKACEMixAuditRenderer(NSString *event, id renderer) {
+        +    @try {
+        +        id pid = YTKACEQueueValue(renderer, @[@"playlistId"]);
+        +        id items = YTKACEQueueValue(renderer, @[@"contentsArray"]);
+        +        NSString *kind = !renderer ? @"absent" : ![pid isKindOfClass:NSString.class] ? @"unknown" : [pid hasPrefix:@"RD"] ? @"mix" : [pid isEqual:@"YTKACEQueue"] ? @"local" : @"other";
+        +        NSString *count = [items respondsToSelector:@selector(count)] ? [NSString stringWithFormat:@"%lu", (unsigned long)[items count]] : @"unknown";
+        +        YTKACEMixAudit([NSString stringWithFormat:@"%@ renderer=%@ items=%@", event, kind, count]);
+        +    } @catch (__unused NSException *e) { YTKACEMixAudit([event stringByAppendingString:@" unavailable"]); }
+        +}
+        +static IMP MixAuditShowOriginal, MixAuditHideOriginal;
+        +static void MixAuditShow(id receiver, SEL selector) {
+        +    YTKACEMixAudit(@"mini show requested");
+        +    ((void (*)(id, SEL))MixAuditShowOriginal)(receiver, selector);
+        +    YTKACEMixAudit(@"mini show returned");
+        +}
+        +static void MixAuditHide(id receiver, SEL selector) {
+        +    YTKACEMixAudit(@"mini hide requested");
+        +    ((void (*)(id, SEL))MixAuditHideOriginal)(receiver, selector);
+        +    YTKACEMixAudit(@"mini hide returned");
+        +}
+        +static void MixAuditInstallVoid(NSString *name, IMP replacement, IMP *original) {
+        +    Method m = class_getInstanceMethod(NSClassFromString(@"YTWatchViewController"), NSSelectorFromString(name));
+        +    char type[16] = {0};
+        +    if (m) method_getReturnType(m, type, sizeof(type));
+        +    BOOL ok = m && method_getNumberOfArguments(m) == 2 && strcmp(type, @encode(void)) == 0 && YTKACEInstallInstanceHook(@"YTWatchViewController", name, replacement, original) && *original != NULL;
+        +    YTKACEMixAudit([NSString stringWithFormat:@"hook %@ %@", name, ok ? @"installed" : @"unavailable"]);
+        +}
+         
+         static IMP OriginalDiscoveryExecute;
+         static IMP OriginalPanelParse;
+        @@ -1164,6 +1211,7 @@
+                 original = ((id (*)(id, SEL, id))OriginalPanelParse)(
+                     receiver, selector, response);
+             }
+        +    YTKACEMixAuditRenderer(@"YTKACEQueuePanelParse", original);
+             if (!YTKACEFeatureEnabled(YTKACEQueueKey)) return original;
+             if (YTKACEQueue().count == 0) return original;
+             if (original != nil) {
+        @@ -1178,6 +1226,7 @@
+             if (OriginalResponsePanel != NULL) {
+                 original = ((id (*)(id, SEL))OriginalResponsePanel)(receiver, selector);
+             }
+        +    YTKACEMixAuditRenderer(@"YTKACEQueueResponsePanel", original);
+             if (!YTKACEFeatureEnabled(YTKACEQueueKey)) return original;
+             if (YTKACEQueue().count == 0) return original;
+             if (original != nil) return original;
+        @@ -1299,6 +1348,7 @@
+         
+         static void YTKACEQueueViewUpdateWatchNext(id receiver, SEL selector,
+                                                    id response) {
+        +    YTKACEMixAudit(@"watch response update");
+             YTKACEQueueWatchViewController = receiver;
+             YTKACEDebugLog(@"queue", @"viewUpdateWatchNext watch=[%@]",
+                   YTKACEQueueDescribeHost(receiver));
+        @@ -1719,9 +1769,10 @@
+             if (YTKACEQueuePanelController != receiver) {
+                 YTKACEQueuePanelController = receiver;
+             }
+        -    if (YTKACEQueueIsActive()) return YES;
+        -    if (OriginalShouldShowPlaylist == NULL) return NO;
+        -    return ((BOOL (*)(id, SEL))OriginalShouldShowPlaylist)(receiver, selector);
+        +    BOOL active = YTKACEQueueIsActive();
+        +    BOOL result = active ? YES : (OriginalShouldShowPlaylist != NULL ? ((BOOL (*)(id, SEL))OriginalShouldShowPlaylist)(receiver, selector) : NO);
+        +    YTKACEMixAudit([NSString stringWithFormat:@"%@ result=%d local=%d", NSStringFromSelector(selector), result, active]);
+        +    return result;
+         }
+         
+         static void YTKACEQueueDidTapShuffle(id receiver, SEL selector) {
+        @@ -2025,9 +2076,10 @@
+             if (YTKACEQueuePanelController != receiver) {
+                 YTKACEQueuePanelController = receiver;
+             }
+        -    if (YTKACEQueueIsActive()) return YES;
+        -    if (OriginalHasQueueContents == NULL) return NO;
+        -    return ((BOOL (*)(id, SEL))OriginalHasQueueContents)(receiver, selector);
+        +    BOOL active = YTKACEQueueIsActive();
+        +    BOOL result = active ? YES : (OriginalHasQueueContents != NULL ? ((BOOL (*)(id, SEL))OriginalHasQueueContents)(receiver, selector) : NO);
+        +    YTKACEMixAudit([NSString stringWithFormat:@"%@ result=%d local=%d", NSStringFromSelector(selector), result, active]);
+        +    return result;
+         }
+         
+         // Whether the player is on a live stream. At the live edge the playback time
+        @@ -2503,6 +2555,8 @@
+         }
+         
+         void YTKACEInstallQueueHooks(void) {
+        +    MixAuditInstallVoid(@"showPlaylistMiniBarIfNeeded", (IMP)MixAuditShow, &MixAuditShowOriginal);
+        +    MixAuditInstallVoid(@"hidePlaylistMiniBar", (IMP)MixAuditHide, &MixAuditHideOriginal);
+             YTKACEInstallInstanceHook(@"YTQueueAddMenuItemCommandHandlerImpl",
+                 @"executeWithCommand:entry:fromView:sender:",
+                 (IMP)YTKACEImplMenuExecute, &OriginalImplMenuExecute);
+        --- a/Tweak/Settings/YTKACERootOptionsController.mm
+        +++ b/Tweak/Settings/YTKACERootOptionsController.mm
+        @@ -516,7 +516,7 @@
+             }
+             NSArray *menu = YTKACESettingsMenu();
+             if (section < (NSInteger)menu.count) return (NSInteger)[menu[(NSUInteger)section][@"rows"] count];
+        -    return 2;
+        +    return 3;
+         }
+         
+         - (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
+        @@ -641,6 +641,13 @@
+                 return cell;
+             }
+         
+        +    if (indexPath.row == 2) {
+        +        UITableViewCell *cell = [self baseCellForTableView:tableView style:UITableViewCellStyleSubtitle];
+        +        cell.textLabel.text = @"믹스 창 진단";
+        +        cell.detailTextLabel.text = @"실행 기록 보기 / 복사";
+        +        cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+        +        return cell;
+        +    }
+             if (indexPath.row == 1) {
+                 UITableViewCell *cell = [self baseCellForTableView:tableView style:UITableViewCellStyleDefault];
+                 cell.textLabel.text = [self deviceInformationText];
+        @@ -669,6 +676,20 @@
+             }
+             NSArray *menu = YTKACESettingsMenu();
+             if (indexPath.section >= (NSInteger)menu.count) {
+        +        if (indexPath.row == 2) {
+        +            extern NSString *YTKACEMixAuditText(void);
+        +            NSString *report = YTKACEMixAuditText();
+        +            UIViewController *screen = [UIViewController new];
+        +            screen.title = @"믹스 창 진단";
+        +            UITextView *view = [UITextView new];
+        +            view.editable = NO;
+        +            view.font = [UIFont monospacedSystemFontOfSize:12 weight:UIFontWeightRegular];
+        +            view.text = report;
+        +            screen.view = view;
+        +            // Select All / Copy is available via the standard text view menu.
+        +            [self.navigationController pushViewController:screen animated:YES];
+        +            return;
+        +        }
+                 if (indexPath.row != 0) return;
+                 NSURL *URL = [NSURL URLWithString:@"https://github.com/itzzace/ytkace"];
+                 [UIApplication.sharedApplication openURL:URL options:@{}
+        MIX_AUDIT_PATCH
+        git -C upstream-ytkace apply --check "$RUNNER_TEMP/mix-runtime-audit.patch"
+        git -C upstream-ytkace apply "$RUNNER_TEMP/mix-runtime-audit.patch"
     - name: Install Theos
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: bash -c "$(curl -fsSL https://raw.githubusercontent.com/roothide/theos/master/bin/install-theos)"
-    - name: Maintain native Mix compact playlist bar (v1.1.8)
-      if: ${{ steps.ytkace_release.outputs.tag == 'v1.1.8' }}
-      shell: bash
-      run: |
-        set -euo pipefail
-        cd upstream-ytkace
-        cat > /tmp/ytkace-mix-mini-bar.patch <<'MIX_MINI_PATCH'
-        --- a/Tweak/Features/Queue/QueueHooks.mm
-        +++ b/Tweak/Features/Queue/QueueHooks.mm
-        @@ -1297,9 +1297,50 @@
-         
-         
-         
-        +// Keep the native collapsed playlist bar available for a real Mix only.
-        +// Do not intercept the pan gesture or change playlist data.
-        +static NSString *YTKACEMixMiniVideoID;
-        +static CFTimeInterval YTKACEMixMiniLastAttempt;
-        +
-        +static void YTKACEMixMiniTrackResponse(id response) {
-        +    YTKACEMixMiniVideoID = nil;
-        +    YTKACEMixMiniLastAttempt = 0;
-        +    @try {
-        +        id wrapper = [response valueForKeyPath:@"contents.singleColumnWatchNextResults.playlist"];
-        +        if (!wrapper) return;
-        +        id panel = [wrapper valueForKey:YTKACEQueuePanelField(wrapper)];
-        +        id owner = YTKACEQueueValue(panel, @[@"playlistId"]);
-        +        id video = [response valueForKeyPath:@"currentVideoEndpoint.watchEndpoint.videoId"];
-        +        if ([owner isKindOfClass:NSString.class] && [owner hasPrefix:@"RD"] &&
-        +            [video isKindOfClass:NSString.class] && [video length] == 11) {
-        +            YTKACEMixMiniVideoID = [video copy];
-        +        }
-        +    } @catch (__unused NSException *exception) { }
-        +}
-        +
-        +static void YTKACEMixMiniMaintain(NSNotification *notification) {
-        +    if (!NSThread.isMainThread || YTKACEMixMiniVideoID.length == 0) return;
-        +    id player = YTKACEQueuePlayerViewController;
-        +    id watch = YTKACEQueueWatchViewController;
-        +    if (!player || notification.object != player || !YTKACEQueueViewOnScreen(watch)) return;
-        +    id live = YTKACEQueueValue(player, @[@"currentVideoID", @"contentVideoID"]);
-        +    if (![live isEqual:YTKACEMixMiniVideoID]) return;
-        +    if (YTKACEQueueIsActive()) return;
-        +    SEL show = @selector(showPlaylistMiniBarIfNeeded);
-        +    if (![watch respondsToSelector:show]) return;
-        +    CFTimeInterval now = NSProcessInfo.processInfo.systemUptime;
-        +    if (now - YTKACEMixMiniLastAttempt < 2.0) return;
-        +    YTKACEMixMiniLastAttempt = now;
-        +    @try {
-        +        // Let YouTube decide whether the compact bar is needed.
-        +        ((void (*)(id, SEL))objc_msgSend)(watch, show);
-        +    } @catch (__unused NSException *exception) { }
-        +}
-        +
-         static void YTKACEQueueViewUpdateWatchNext(id receiver, SEL selector,
-                                                    id response) {
-             YTKACEQueueWatchViewController = receiver;
-        +    YTKACEMixMiniTrackResponse(response);
-             YTKACEDebugLog(@"queue", @"viewUpdateWatchNext watch=[%@]",
-                   YTKACEQueueDescribeHost(receiver));
-             YTKACEQueuePanelInjected = NO;
-        @@ -2675,6 +2716,7 @@
-                             object:nil
-                              queue:NSOperationQueue.mainQueue
-                         usingBlock:^(NSNotification *notification) {
-        +        YTKACEMixMiniMaintain(notification);
-                 YTKACEQueueHandlePlaybackTime(notification);
-             }];
-         }
-        MIX_MINI_PATCH
-        git apply --check /tmp/ytkace-mix-mini-bar.patch
-        git apply /tmp/ytkace-mix-mini-bar.patch
     - name: Build YTKACE Rootless DEB and extract shipped library
       shell: bash
       run: "set -euo pipefail\n# Theos installer can leave incompatible Clang precompiled modules.\n# Isolate this\
