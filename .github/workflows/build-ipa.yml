@@ -76,86 +76,77 @@ jobs:
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: bash -c "$(curl -fsSL https://raw.githubusercontent.com/roothide/theos/master/bin/install-theos)"
-    - name: Preserve native Mix playlist visibility (v1.1.8)
+    - name: Maintain native Mix compact playlist bar (v1.1.8)
       if: ${{ steps.ytkace_release.outputs.tag == 'v1.1.8' }}
       shell: bash
       run: |
         set -euo pipefail
         cd upstream-ytkace
-        cat > /tmp/ytkace-mix-keep.patch <<'MIX_PATCH'
+        cat > /tmp/ytkace-mix-mini-bar.patch <<'MIX_MINI_PATCH'
         --- a/Tweak/Features/Queue/QueueHooks.mm
         +++ b/Tweak/Features/Queue/QueueHooks.mm
-        @@ -1715,13 +1715,33 @@
-                 actionEnabled, loopMode, renderer, useRendererSaveIcons);
-         }
+        @@ -1297,9 +1297,50 @@
          
-        +// Preserve a real native Mix panel, not the local YTKACE queue.
-        +// Do not fabricate a playlist or reuse a renderer from another video.
-        +static BOOL YTKACEMixPanelHasContents(id receiver) {
+         
+         
+        +// Keep the native collapsed playlist bar available for a real Mix only.
+        +// Do not intercept the pan gesture or change playlist data.
+        +static NSString *YTKACEMixMiniVideoID;
+        +static CFTimeInterval YTKACEMixMiniLastAttempt;
+        +
+        +static void YTKACEMixMiniTrackResponse(id response) {
+        +    YTKACEMixMiniVideoID = nil;
+        +    YTKACEMixMiniLastAttempt = 0;
         +    @try {
-        +        id panel = [receiver valueForKey:@"playlistPanelRenderer"];
-        +        if (![panel isKindOfClass:NSClassFromString(@"YTIPlaylistPanelRenderer")]) return NO;
-        +        id owner = [panel valueForKey:@"playlistId"];
-        +        if (![owner isKindOfClass:NSString.class] || ![owner hasPrefix:@"RD"]) return NO;
-        +        id entries = [panel valueForKey:@"contentsArray"];
-        +        if (![entries isKindOfClass:NSArray.class]) return NO;
-        +        for (id entry in entries) {
-        +            id video = YTKACEQueueValue(entry, @[@"playlistPanelVideoRenderer"]);
-        +            id videoID = YTKACEQueueValue(video, @[@"videoId"]);
-        +            if ([videoID isKindOfClass:NSString.class] && [videoID length] != 0) return YES;
+        +        id wrapper = [response valueForKeyPath:@"contents.singleColumnWatchNextResults.playlist"];
+        +        if (!wrapper) return;
+        +        id panel = [wrapper valueForKey:YTKACEQueuePanelField(wrapper)];
+        +        id owner = YTKACEQueueValue(panel, @[@"playlistId"]);
+        +        id video = [response valueForKeyPath:@"currentVideoEndpoint.watchEndpoint.videoId"];
+        +        if ([owner isKindOfClass:NSString.class] && [owner hasPrefix:@"RD"] &&
+        +            [video isKindOfClass:NSString.class] && [video length] == 11) {
+        +            YTKACEMixMiniVideoID = [video copy];
         +        }
-        +    } @catch (__unused NSException *exception) {}
-        +    return NO;
+        +    } @catch (__unused NSException *exception) { }
         +}
         +
-         static BOOL YTKACEQueueShouldShowPlaylist(id receiver, SEL selector) {
-             if (YTKACEQueuePanelController != receiver) {
-                 YTKACEQueuePanelController = receiver;
-             }
-             if (YTKACEQueueIsActive()) return YES;
-        -    if (OriginalShouldShowPlaylist == NULL) return NO;
-        -    return ((BOOL (*)(id, SEL))OriginalShouldShowPlaylist)(receiver, selector);
-        +    BOOL original = OriginalShouldShowPlaylist != NULL &&
-        +        ((BOOL (*)(id, SEL))OriginalShouldShowPlaylist)(receiver, selector);
-        +    return original || YTKACEMixPanelHasContents(receiver);
+        +static void YTKACEMixMiniMaintain(NSNotification *notification) {
+        +    if (!NSThread.isMainThread || YTKACEMixMiniVideoID.length == 0) return;
+        +    id player = YTKACEQueuePlayerViewController;
+        +    id watch = YTKACEQueueWatchViewController;
+        +    if (!player || notification.object != player || !YTKACEQueueViewOnScreen(watch)) return;
+        +    id live = YTKACEQueueValue(player, @[@"currentVideoID", @"contentVideoID"]);
+        +    if (![live isEqual:YTKACEMixMiniVideoID]) return;
+        +    if (YTKACEQueueIsActive()) return;
+        +    SEL show = @selector(showPlaylistMiniBarIfNeeded);
+        +    if (![watch respondsToSelector:show]) return;
+        +    CFTimeInterval now = NSProcessInfo.processInfo.systemUptime;
+        +    if (now - YTKACEMixMiniLastAttempt < 2.0) return;
+        +    YTKACEMixMiniLastAttempt = now;
+        +    @try {
+        +        // Let YouTube decide whether the compact bar is needed.
+        +        ((void (*)(id, SEL))objc_msgSend)(watch, show);
+        +    } @catch (__unused NSException *exception) { }
+        +}
+        +
+         static void YTKACEQueueViewUpdateWatchNext(id receiver, SEL selector,
+                                                    id response) {
+             YTKACEQueueWatchViewController = receiver;
+        +    YTKACEMixMiniTrackResponse(response);
+             YTKACEDebugLog(@"queue", @"viewUpdateWatchNext watch=[%@]",
+                   YTKACEQueueDescribeHost(receiver));
+             YTKACEQueuePanelInjected = NO;
+        @@ -2675,6 +2716,7 @@
+                             object:nil
+                              queue:NSOperationQueue.mainQueue
+                         usingBlock:^(NSNotification *notification) {
+        +        YTKACEMixMiniMaintain(notification);
+                 YTKACEQueueHandlePlaybackTime(notification);
+             }];
          }
-         
-         static void YTKACEQueueDidTapShuffle(id receiver, SEL selector) {
-        @@ -2026,8 +2046,9 @@
-                 YTKACEQueuePanelController = receiver;
-             }
-             if (YTKACEQueueIsActive()) return YES;
-        -    if (OriginalHasQueueContents == NULL) return NO;
-        -    return ((BOOL (*)(id, SEL))OriginalHasQueueContents)(receiver, selector);
-        +    BOOL original = OriginalHasQueueContents != NULL &&
-        +        ((BOOL (*)(id, SEL))OriginalHasQueueContents)(receiver, selector);
-        +    return original || YTKACEMixPanelHasContents(receiver);
-         }
-         
-         // Whether the player is on a live stream. At the live edge the playback time
-        @@ -2607,13 +2628,12 @@
-                 (IMP)YTKACEQueuePanelByline, &OriginalPanelByline);
-             YTKACEInstallInstanceHook(@"YTPlaylistPanelController", @"isQueue",
-                 (IMP)YTKACEQueueIsQueue, &OriginalIsQueue);
-        -    if (!YTKACEInstallInstanceHook(@"YTPlaylistPanelController",
-        +    YTKACEInstallInstanceHook(@"YTPlaylistPanelController",
-                 @"hasQueueContents", (IMP)YTKACEQueueHasContents,
-        -        &OriginalHasQueueContents)) {
-        -        YTKACEInstallInstanceHook(@"YTPlaylistPanelController",
-        -            @"shouldShowPlaylist", (IMP)YTKACEQueueShouldShowPlaylist,
-        -            &OriginalShouldShowPlaylist);
-        -    }
-        +        &OriginalHasQueueContents);
-        +    YTKACEInstallInstanceHook(@"YTPlaylistPanelController",
-        +        @"shouldShowPlaylist", (IMP)YTKACEQueueShouldShowPlaylist,
-        +        &OriginalShouldShowPlaylist);
-             YTKACEInstallInstanceHook(@"YTQueueController",
-                 @"moveItemAtIndexPath:toIndexPath:userTriggered:",
-                 (IMP)YTKACEQueueMoveItem, &OriginalMoveItem);
-        MIX_PATCH
-        git apply --check /tmp/ytkace-mix-keep.patch
-        git apply /tmp/ytkace-mix-keep.patch
-        git diff --stat
+        MIX_MINI_PATCH
+        git apply --check /tmp/ytkace-mix-mini-bar.patch
+        git apply /tmp/ytkace-mix-mini-bar.patch
     - name: Build YTKACE Rootless DEB and extract shipped library
       shell: bash
       run: "set -euo pipefail\n# Theos installer can leave incompatible Clang precompiled modules.\n# Isolate this\
