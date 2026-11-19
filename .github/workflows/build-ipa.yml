@@ -386,6 +386,252 @@ jobs:
         AUDIT_V2
         git -C upstream-ytkace apply --check "$RUNNER_TEMP/mix-audit-v2.patch"
         git -C upstream-ytkace apply "$RUNNER_TEMP/mix-audit-v2.patch"
+    - name: Observe mix collapse and native response (audit v3)
+      shell: bash
+      run: |
+        set -euo pipefail
+        cat > "$RUNNER_TEMP/mix-audit-v3.patch" <<'AUDIT_V3'
+        --- a/Tweak/Features/Queue/QueueHooks.mm
+        +++ b/Tweak/Features/Queue/QueueHooks.mm
+        @@ -54,13 +54,13 @@
+         void YTKACEMixAudit(NSString *event) {
+             @synchronized (YTKACEMixAuditLock()) {
+                 if (!YTKACEMixAuditEvents) {
+        -            NSArray *saved = [NSUserDefaults.standardUserDefaults arrayForKey:@"YTKACE.MixAudit.V2.Events"];
+        +            NSArray *saved = [NSUserDefaults.standardUserDefaults arrayForKey:@"YTKACE.MixAudit.V3.Events"];
+                     YTKACEMixAuditEvents = saved ? [saved mutableCopy] : [NSMutableArray new];
+        -            [YTKACEMixAuditEvents addObject:@"--- new process ---"];
+        -        }
+        -        while (YTKACEMixAuditEvents.count >= 240) [YTKACEMixAuditEvents removeObjectAtIndex:0];
+        +            [YTKACEMixAuditEvents addObject:@"--- mix audit v3 / new process ---"];
+        +        }
+        +        while (YTKACEMixAuditEvents.count >= 320) [YTKACEMixAuditEvents removeObjectAtIndex:0];
+                 [YTKACEMixAuditEvents addObject:[NSString stringWithFormat:@"%.2f %@", NSProcessInfo.processInfo.systemUptime, event]];
+        -        [NSUserDefaults.standardUserDefaults setObject:[YTKACEMixAuditEvents copy] forKey:@"YTKACE.MixAudit.V2.Events"];
+        +        [NSUserDefaults.standardUserDefaults setObject:[YTKACEMixAuditEvents copy] forKey:@"YTKACE.MixAudit.V3.Events"];
+             }
+         }
+         NSString *YTKACEMixAuditText(void) {
+        @@ -77,40 +77,74 @@
+                 YTKACEMixAudit([NSString stringWithFormat:@"%@ renderer=%@ items=%@", event, kind, count]);
+             } @catch (__unused NSException *e) { YTKACEMixAudit([event stringByAppendingString:@" unavailable"]); }
+         }
+        +// V3: read the native watch-next response without injecting or reloading it.
+        +// Only a category and item count are logged, never video/playlist IDs or descriptions.
+        +static __weak id MixAuditWatchResponse;
+        +static NSString *MixAuditLastSample;
+        +static NSUInteger MixAuditResponseSequence;
+        +static id MixAuditRead(id object, NSString *key) {
+        +    if (!object) return nil;
+        +    @try { return [object valueForKey:key]; }
+        +    @catch (__unused NSException *e) { return nil; }
+        +}
+        +static NSString *MixAuditKind(id value) {
+        +    if (![value isKindOfClass:NSString.class] || [value length] == 0) return @"none/unknown";
+        +    if ([value isEqualToString:@"YTKACEQueue"]) return @"local";
+        +    return [value hasPrefix:@"RD"] ? @"mix" : @"other";
+        +}
+        +static NSString *MixAuditSample(id response) {
+        +    if (!response) return @"response=absent";
+        +    id single = MixAuditRead(MixAuditRead(response, @"contents"), @"singleColumnWatchNextResults");
+        +    id wrapper = MixAuditRead(single, @"playlist");
+        +    id panel = MixAuditRead(wrapper, @"playlist");
+        +    if (![panel isKindOfClass:NSClassFromString(@"YTIPlaylistPanelRenderer")]) {
+        +        if ([wrapper isKindOfClass:NSClassFromString(@"YTIPlaylistPanelRenderer")]) panel = wrapper;
+        +    }
+        +    BOOL panelKnown = [panel isKindOfClass:NSClassFromString(@"YTIPlaylistPanelRenderer")];
+        +    id items = panelKnown ? MixAuditRead(panel, @"contentsArray") : nil;
+        +    NSString *count = [items isKindOfClass:NSArray.class] ? [NSString stringWithFormat:@"%lu", (unsigned long)[items count]] : @"unknown";
+        +    id endpoint = MixAuditRead(MixAuditRead(response, @"currentVideoEndpoint"), @"watchEndpoint");
+        +    return [NSString stringWithFormat:@"single=%d wrapper=%d panel=%@ items=%@ endpoint=%@", single != nil, wrapper != nil,
+        +        panelKnown ? MixAuditKind(MixAuditRead(panel, @"playlistId")) : (wrapper ? @"unresolved" : @"absent"), count,
+        +        MixAuditKind(MixAuditRead(endpoint, @"playlistId"))];
+        +}
+        +NSString *YTKACEMixAuditCurrentState(void) {
+        +    if (![NSThread isMainThread]) return @"off-main (state not read)";
+        +    id response = MixAuditWatchResponse;
+        +    return [NSString stringWithFormat:@"seq=%lu %@ %@ tweakAutoOff=%d", (unsigned long)MixAuditResponseSequence,
+        +        response ? @"live" : @"last-sample", response ? MixAuditSample(response) : (MixAuditLastSample ?: @"no watch response"),
+        +        YTKACEFeatureEnabled(@"YTKACE.Preference.Playback.AutoplayDisabled")];
+        +}
+        +static void MixAuditRecordWatchResponse(id response) {
+        +    if (![NSThread isMainThread]) { YTKACEMixAudit(@"watch response off-main (state not read)"); return; }
+        +    ++MixAuditResponseSequence;
+        +    MixAuditWatchResponse = response;
+        +    MixAuditLastSample = MixAuditSample(response);
+        +    YTKACEMixAudit([@"watch response before " stringByAppendingString:YTKACEMixAuditCurrentState()]);
+        +}
+        +
+         static IMP MixAuditShowOriginal, MixAuditHideOriginal;
+         static void MixAuditShow(id receiver, SEL selector) {
+        -    YTKACEMixAudit(@"mini show requested");
+        +    YTKACEMixAudit([@"mini show before " stringByAppendingString:YTKACEMixAuditCurrentState()]);
+             ((void (*)(id, SEL))MixAuditShowOriginal)(receiver, selector);
+        -    YTKACEMixAudit(@"mini show returned");
+        +    YTKACEMixAudit([@"mini show after " stringByAppendingString:YTKACEMixAuditCurrentState()]);
+         }
+         static void MixAuditHide(id receiver, SEL selector) {
+        -    YTKACEMixAudit(@"mini hide requested");
+        -    NSArray<NSString *> *frames = NSThread.callStackSymbols;
+        -    NSUInteger count = MIN(frames.count, (NSUInteger)9);
+        -    for (NSUInteger i = 1; i < count; i++) {
+        -        // Retain only Objective-C method names, not addresses or arbitrary symbols.
+        -        NSString *frame = frames[i];
+        -        NSRange start = [frame rangeOfString:@"-["];
+        -        if (start.location == NSNotFound) start = [frame rangeOfString:@"+["];
+        -        if (start.location != NSNotFound) {
+        -            NSRange end = [frame rangeOfString:@"]" options:0 range:NSMakeRange(start.location, frame.length-start.location)];
+        -            if (end.location != NSNotFound) {
+        -                NSString *method = [frame substringWithRange:NSMakeRange(start.location, end.location-start.location+1)];
+        -                YTKACEMixAudit([NSString stringWithFormat:@"hide caller %lu %@", (unsigned long)i, method]);
+        -                continue;
+        -            }
+        -        }
+        -        // Keep the module-relative offset for stripped frames; never include absolute addresses.
+        +    YTKACEMixAudit([@"mini hide before " stringByAppendingString:YTKACEMixAuditCurrentState()]);
+        +    // One compact stack line, so repeated hides do not evict the gesture markers.
+        +    NSMutableArray<NSString *> *callers = [NSMutableArray new];
+        +    NSArray<NSNumber *> *addresses = NSThread.callStackReturnAddresses;
+        +    for (NSUInteger i = 1; i < MIN(addresses.count, (NSUInteger)5); i++) {
+                 Dl_info info = {};
+        -        NSArray<NSNumber *> *addresses = NSThread.callStackReturnAddresses;
+        -        if (i < addresses.count && dladdr((void *)addresses[i].unsignedLongLongValue, &info) && info.dli_fbase && info.dli_fname) {
+        +        uintptr_t address = (uintptr_t)addresses[i].unsignedLongLongValue;
+        +        if (dladdr((void *)address, &info) && info.dli_fbase && info.dli_fname) {
+                     NSString *module = [[NSString stringWithUTF8String:info.dli_fname] lastPathComponent];
+        -            unsigned long long offset = addresses[i].unsignedLongLongValue - (uintptr_t)info.dli_fbase;
+        -            YTKACEMixAudit([NSString stringWithFormat:@"hide caller %lu %@+0x%llx", (unsigned long)i, module, offset]);
+        -        }
+        -    }
+        +            [callers addObject:[NSString stringWithFormat:@"%@+0x%llx", module, (unsigned long long)(address - (uintptr_t)info.dli_fbase)]];
+        +        }
+        +    }
+        +    YTKACEMixAudit([@"hide callers " stringByAppendingString:[callers componentsJoinedByString:@" | "]]);
+             ((void (*)(id, SEL))MixAuditHideOriginal)(receiver, selector);
+        -    YTKACEMixAudit(@"mini hide returned");
+        +    YTKACEMixAudit([@"mini hide after " stringByAppendingString:YTKACEMixAuditCurrentState()]);
+         }
+         static void MixAuditInstallVoid(NSString *name, IMP replacement, IMP *original) {
+             Method m = class_getInstanceMethod(NSClassFromString(@"YTWatchViewController"), NSSelectorFromString(name));
+        @@ -1379,7 +1413,7 @@
+         
+         static void YTKACEQueueViewUpdateWatchNext(id receiver, SEL selector,
+                                                    id response) {
+        -    YTKACEMixAudit(@"watch response update");
+        +    MixAuditRecordWatchResponse(response);
+             YTKACEQueueWatchViewController = receiver;
+             YTKACEDebugLog(@"queue", @"viewUpdateWatchNext watch=[%@]",
+                   YTKACEQueueDescribeHost(receiver));
+        @@ -1389,6 +1423,7 @@
+                 ((void (*)(id, SEL, id))OriginalViewUpdateWatchNext)(
+                     receiver, selector, response);
+             }
+        +    YTKACEMixAudit([@"watch response after " stringByAppendingString:YTKACEMixAuditCurrentState()]);
+         }
+         
+         
+        @@ -1802,7 +1837,7 @@
+             }
+             BOOL active = YTKACEQueueIsActive();
+             BOOL result = active ? YES : (OriginalShouldShowPlaylist != NULL ? ((BOOL (*)(id, SEL))OriginalShouldShowPlaylist)(receiver, selector) : NO);
+        -    YTKACEMixAudit([NSString stringWithFormat:@"%@ result=%d local=%d", NSStringFromSelector(selector), result, active]);
+        +    YTKACEMixAudit([NSString stringWithFormat:@"%@ result=%d local=%d %@", NSStringFromSelector(selector), result, active, YTKACEMixAuditCurrentState()]);
+             return result;
+         }
+         
+        @@ -2109,7 +2144,7 @@
+             }
+             BOOL active = YTKACEQueueIsActive();
+             BOOL result = active ? YES : (OriginalHasQueueContents != NULL ? ((BOOL (*)(id, SEL))OriginalHasQueueContents)(receiver, selector) : NO);
+        -    YTKACEMixAudit([NSString stringWithFormat:@"%@ result=%d local=%d", NSStringFromSelector(selector), result, active]);
+        +    YTKACEMixAudit([NSString stringWithFormat:@"%@ result=%d local=%d %@", NSStringFromSelector(selector), result, active, YTKACEMixAuditCurrentState()]);
+             return result;
+         }
+         
+        --- a/Tweak/Features/Playback/AutoplayControls.mm
+        +++ b/Tweak/Features/Playback/AutoplayControls.mm
+        @@ -8,6 +8,7 @@
+         #import <QuartzCore/QuartzCore.h>
+         #import <objc/message.h>
+         #import <objc/runtime.h>
+        +#include <math.h>
+         
+         static NSString *const YTKACEOpenPausedKey =
+             @"YTKACE.Preference.Playback.OpenPaused";
+        @@ -118,12 +119,70 @@
+         
+         
+         
+        +// V3: observe the existing touch-dispatch path; do not cancel, consume, or add gestures.
+        +// A downward swipe marker is a candidate, not proof of an actual sheet dismissal.
+        +extern void YTKACEMixAudit(NSString *event);
+        +extern NSString *YTKACEMixAuditCurrentState(void);
+        +static __weak UITouch *MixAuditTouch;
+        +static CGPoint MixAuditTouchStart;
+        +static BOOL MixAuditDownMarked;
+        +static NSString *MixAuditTouchScope;
+        +static NSString *MixAuditScopeForView(UIView *view) {
+        +    BOOL watch = NO;
+        +    for (NSUInteger n = 0; view && n < 24; ++n, view = view.superview) {
+        +        NSString *name = NSStringFromClass(view.class).lowercaseString;
+        +        if ([name containsString:@"playlist"] || [name containsString:@"queuepanel"]) return @"playlist-view";
+        +        if ([name containsString:@"watch"] || [name containsString:@"engagementpanel"] || [name containsString:@"bottomsheet"]) watch = YES;
+        +        UIResponder *next = view.nextResponder;
+        +        if ([next isKindOfClass:UIViewController.class]) {
+        +            NSString *controller = NSStringFromClass(next.class).lowercaseString;
+        +            if ([controller containsString:@"playlist"] || [controller containsString:@"queuepanel"]) return @"playlist-controller";
+        +            if ([controller containsString:@"watch"] || [controller containsString:@"engagementpanel"] || [controller containsString:@"bottomsheet"]) watch = YES;
+        +        }
+        +    }
+        +    return watch ? @"watch/sheet-candidate" : nil;
+        +}
+        +static BOOL MixAuditObserveTouch(UIEvent *event) {
+        +    if (![NSThread isMainThread]) return NO;
+        +    NSSet<UITouch *> *touches = event.allTouches;
+        +    if (touches.count != 1) { MixAuditTouch = nil; MixAuditTouchScope = nil; return NO; }
+        +    UITouch *touch = touches.anyObject;
+        +    if (touch.phase == UITouchPhaseBegan) {
+        +        MixAuditTouch = touch;
+        +        MixAuditTouchStart = [touch locationInView:nil];
+        +        MixAuditDownMarked = NO;
+        +        MixAuditTouchScope = MixAuditScopeForView(touch.view);
+        +        return NO;
+        +    }
+        +    if (touch != MixAuditTouch || !MixAuditTouchScope) return NO;
+        +    if (touch.phase == UITouchPhaseCancelled) {
+        +        if (MixAuditDownMarked) YTKACEMixAudit(@"downward gesture cancelled");
+        +        MixAuditTouch = nil; MixAuditTouchScope = nil; return NO;
+        +    }
+        +    CGPoint point = [touch locationInView:nil];
+        +    CGFloat dx = point.x - MixAuditTouchStart.x, dy = point.y - MixAuditTouchStart.y;
+        +    if ((touch.phase == UITouchPhaseMoved || touch.phase == UITouchPhaseEnded) && !MixAuditDownMarked && dy > 34 && dy > 1.4 * fabs(dx)) {
+        +        MixAuditDownMarked = YES;
+        +        YTKACEMixAudit([NSString stringWithFormat:@"downward gesture begin scope=%@ %@", MixAuditTouchScope, YTKACEMixAuditCurrentState()]);
+        +    }
+        +    if (touch.phase != UITouchPhaseEnded) return NO;
+        +    BOOL marked = MixAuditDownMarked;
+        +    if (marked) YTKACEMixAudit([NSString stringWithFormat:@"downward gesture end-before-dispatch scope=%@ %@", MixAuditTouchScope, YTKACEMixAuditCurrentState()]);
+        +    MixAuditTouch = nil; MixAuditTouchScope = nil;
+        +    return marked;
+        +}
+        +
+         static void YTKACESendEvent(id receiver, SEL selector, UIEvent *event) {
+        +    BOOL mixAuditEnded = NO;
+             if (event.type == UIEventTypeTouches) {
+                 YTKACELastTouchTime = CACurrentMediaTime();
+        +        mixAuditEnded = MixAuditObserveTouch(event);
+             }
+             if (OriginalSendEvent != NULL) {
+                 ((void (*)(id, SEL, id))OriginalSendEvent)(receiver, selector, event);
+        +    }
+        +    if (mixAuditEnded) {
+        +        YTKACEMixAudit([@"downward gesture end-after-dispatch " stringByAppendingString:YTKACEMixAuditCurrentState()]);
+             }
+         }
+         
+        AUDIT_V3
+        git -C upstream-ytkace apply --check "$RUNNER_TEMP/mix-audit-v3.patch"
+        git -C upstream-ytkace apply "$RUNNER_TEMP/mix-audit-v3.patch"
     - name: Install Theos
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
