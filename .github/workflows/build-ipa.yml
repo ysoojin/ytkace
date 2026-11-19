@@ -108,7 +108,7 @@ jobs:
         if-no-files-found: error
   package:
     needs: ytkace
-    runs-on: macos-15
+    runs-on: macos-26
     env:
       THEOS: ${{ github.workspace }}/.theos
       CI: 'true'
