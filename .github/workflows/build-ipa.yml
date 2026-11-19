@@ -72,11 +72,13 @@ jobs:
         ref: ${{ steps.ytkace_release.outputs.tag }}
         path: upstream-ytkace
         submodules: recursive
-    - name: Select native legacy playlist minibar and restore runtime audit (V7)
+    - name: Prepare legacy minibar and runtime audit patch (V7 part 1)
+      env:
+        YTKACE_V7_TAG: ${{ steps.ytkace_release.outputs.tag }}
       shell: bash
       run: |
         set -euo pipefail
-        test "${{ steps.ytkace_release.outputs.tag }}" = v1.1.8
+        test "$YTKACE_V7_TAG" = v1.1.8
         cat > "$RUNNER_TEMP/mix-legacy-audit-v7.patch" <<'MIX_LEGACY_AUDIT_V7'
         --- a/Tweak/Entry.mm
         +++ b/Tweak/Entry.mm
@@ -235,6 +237,12 @@ jobs:
              }
          }
          
+        MIX_LEGACY_AUDIT_V7
+    - name: Complete and apply legacy minibar and runtime audit patch (V7 part 2)
+      shell: bash
+      run: |
+        set -euo pipefail
+        cat >> "$RUNNER_TEMP/mix-legacy-audit-v7.patch" <<'MIX_LEGACY_AUDIT_V7'
         --- a/Tweak/Features/Queue/QueueHooks.mm
         +++ b/Tweak/Features/Queue/QueueHooks.mm
         @@ -10,6 +10,8 @@
