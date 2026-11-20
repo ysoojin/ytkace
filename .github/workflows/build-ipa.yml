@@ -28,10 +28,6 @@ name: IPA (YTKACE built-in RYD for Shorts/details + v10.17 main counts 30s)
         description: YTABConfig (default OFF)
         type: boolean
         default: false
-      add_ytanotherminiplayer:
-        description: YTAnotherMiniplayer alternative miniplayer style (default OFF)
-        type: boolean
-        default: false
       add_ytsilentvote:
         description: YTSilentVote (default OFF)
         type: boolean
@@ -157,7 +153,7 @@ jobs:
       run: brew install ldid
     - name: Install optional DEB and cyan tools
       if: ${{ inputs.add_ryd || inputs.add_ytuhd || inputs.add_ytabconfig || inputs.add_ytsilentvote || inputs.add_donteatmycontent
-        || inputs.add_youmute || inputs.add_yougroupsettings || inputs.add_ytanotherminiplayer }}
+        || inputs.add_youmute || inputs.add_yougroupsettings }}
       run: 'set -euo pipefail
 
         brew install dpkg
@@ -173,7 +169,7 @@ jobs:
         '
     - name: Install Theos for selected tweaks
       if: ${{ inputs.add_ryd || inputs.add_ytuhd || inputs.add_ytabconfig || inputs.add_ytsilentvote || inputs.add_donteatmycontent
-        || inputs.add_youmute || inputs.add_yougroupsettings || inputs.add_ytanotherminiplayer }}
+        || inputs.add_youmute || inputs.add_yougroupsettings }}
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: 'set -euo pipefail
@@ -255,7 +251,6 @@ jobs:
         RYD_DIAGNOSTICS: ${{ inputs.ryd_diagnostics }}
         ADD_YTUHD: ${{ inputs.add_ytuhd }}
         ADD_YTABCONFIG: ${{ inputs.add_ytabconfig }}
-        ADD_YTANOTHERMINIPLAYER: ${{ inputs.add_ytanotherminiplayer }}
         ADD_YTSILENTVOTE: ${{ inputs.add_ytsilentvote }}
         ADD_DONTEATMYCONTENT: ${{ inputs.add_donteatmycontent }}
         ADD_YOUMUTE: ${{ inputs.add_youmute }}
@@ -264,7 +259,7 @@ jobs:
       run: "set -euo pipefail\nmkdir -p extra-debs sources\n: > selected-success.txt\n: > selected-failed.txt\n\
         : > requested-tweaks.txt\nfor pair in \"ryd:$ADD_RYD\" \"ytuhd:$ADD_YTUHD\" \"ytabconfig:$ADD_YTABCONFIG\"\
         \ \"ytsilentvote:$ADD_YTSILENTVOTE\" \"donteatmycontent:$ADD_DONTEATMYCONTENT\" \"youmute:$ADD_YOUMUTE\"\
-        \ \"yougroupsettings:$ADD_YOUGROUPSETTINGS\" \"ytanotherminiplayer:$ADD_YTANOTHERMINIPLAYER\"; do\n  if [[ \"${pair##*:}\" == true ]]; then printf '%s\\\
+        \ \"yougroupsettings:$ADD_YOUGROUPSETTINGS\"; do\n  if [[ \"${pair##*:}\" == true ]]; then printf '%s\\\
         n' \"${pair%%:*}\" >> requested-tweaks.txt; fi\ndone\n# Optional tweak build failures are reported, not\
         \ fatal.\nmkdir -p \"$THEOS/include\"\ngit clone --depth 1 https://github.com/PoomSmart/PSHeader.git \"\
         $THEOS/include/PSHeader\" || echo 'WARN: PSHeader unavailable (some tweaks may fail)'\ngit clone --depth\
@@ -274,7 +269,7 @@ jobs:
         build_one() {\n  local key=\"$1\" repo=\"$2\" flag=\"$3\" out=\"sources/$1\"\n  [[ \"$flag\" == true ]]\
         \ || return 0\n  echo \"::group::Building optional tweak $key\"\n  if ! git clone --depth 1 --recurse-submodules\
         \ \"https://github.com/$repo.git\" \"$out\"; then\n    echo \"FAILED $key: git clone\" | tee -a selected-failed.txt\n\
-        \    echo '::endgroup::'\n    return 0\n  fi\n  if [[ \"$key\" == ytabconfig ]]; then\n    if ! python3 \"$RUNNER_TEMP/patch-ytabc-mix.py\" \"$out\"; then\n      echo \"FAILED $key: Mix default OFF patch failed; refusing unpatched YTABConfig\" | tee -a selected-failed.txt\n      echo '::endgroup::'\n      return 0\n    fi\n  fi\n  if [[ \"$key\" == ytanotherminiplayer ]]; then\n    if ! python3 - \"$out\" <<'PY_YTAM_FILTER'\nfrom pathlib import Path\nimport plistlib, sys\np = Path(sys.argv[1]) / 'YTAnotherMiniplayer.plist'\nif not p.is_file() or 'com.google.ios.youtube' not in p.read_text() or 'Filter' not in p.read_text():\n    sys.exit('Unexpected YTAnotherMiniplayer filter; refusing blind patch')\np.write_bytes(plistlib.dumps({'Filter': {'Executables': ['YouTube']}}, fmt=plistlib.FMT_XML))\nprint('YTAnotherMiniplayer sideload filter: Executables = YouTube')\nPY_YTAM_FILTER\n    then\n      echo 'FAILED ytanotherminiplayer: sideload filter' | tee -a selected-failed.txt\n      echo '::endgroup::'\n      return 0\n    fi\n  fi\n  # RYD upstream filters only the stock bundle ID. Sideload\
+        \    echo '::endgroup::'\n    return 0\n  fi\n  if [[ \"$key\" == ytabconfig ]]; then\n    if ! python3 \"$RUNNER_TEMP/patch-ytabc-mix.py\" \"$out\"; then\n      echo \"FAILED $key: Mix default OFF patch failed; refusing unpatched YTABConfig\" | tee -a selected-failed.txt\n      echo '::endgroup::'\n      return 0\n    fi\n  fi\n  # RYD upstream filters only the stock bundle ID. Sideload\
         \ signing\n  # may change CFBundleIdentifier, preventing Substrate from loading\n  # an otherwise correctly\
         \ injected dylib. Match the executable\n  # instead, which remains \"YouTube\" for this IPA build.\n  if\
         \ [[ \"$key\" == ryd ]]; then\n    python3 - \"$out\" <<'PY_RYD_FILTER'\nfrom pathlib import Path\nimport\
@@ -921,7 +916,7 @@ jobs:
         \ these two packages as a pair; never inject just one.\n  if [[ ! -s extra-debs/ytvideooverlay.deb || !\
         \ -s extra-debs/youmute.deb ]]; then\n    rm -f extra-debs/ytvideooverlay.deb extra-debs/youmute.deb\n \
         \   echo 'FAILED youmute-pair: helper or main tweak missing; excluded both DEBs' | tee -a selected-failed.txt\n\
-        \  fi\nfi\nbuild_one yougroupsettings PoomSmart/YouGroupSettings \"$ADD_YOUGROUPSETTINGS\"\nbuild_one ytanotherminiplayer PoomSmart/YTAnotherMiniplayer \"$ADD_YTANOTHERMINIPLAYER\"\necho 'Successfully\
+        \  fi\nfi\nbuild_one yougroupsettings PoomSmart/YouGroupSettings \"$ADD_YOUGROUPSETTINGS\"\necho 'Successfully\
         \ built optional DEB packages:'\nfind extra-debs -maxdepth 1 -type f -name '*.deb' -print | sort\necho 'Skipped\
         \ optional tweaks:'\ncat selected-failed.txt\n"
     - name: Require selected RYD build artifact
@@ -1079,23 +1074,6 @@ jobs:
             assert b'YTABC-MixPostHook-v3' in z.read(paths[0]), 'Compiled YTABConfig Mix post-hook patch missing'
             print('PASS: patched YTABConfig included in final IPA')
         PY_MIX_VERIFY
-    - name: Verify selected YTAnotherMiniplayer in final IPA
-      if: ${{ inputs.add_ytanotherminiplayer }}
-      shell: bash
-      env:
-        IPA_PATH: ${{ steps.inject.outputs.ipa }}
-      run: |
-        set -euo pipefail
-        python3 - "$IPA_PATH" <<'PY_YTAM_VERIFY'
-        import sys, zipfile
-        from pathlib import PurePosixPath
-        with zipfile.ZipFile(sys.argv[1]) as z:
-            paths = [p for p in z.namelist() if p.startswith('Payload/') and '.app/' in p and PurePosixPath(p).name.lower() == 'ytanotherminiplayer.dylib']
-            assert len(paths) == 1, f'Expected selected YTAnotherMiniplayer dylib: {paths}'
-            data = z.read(paths[0])
-            assert b'YTWatchMiniplayerConstants' in data and b'miniplayerVariant' in data, 'Expected upstream miniplayer hook missing'
-            print('PASS: YTAnotherMiniplayer included in final IPA; runtime compatibility still unverified')
-        PY_YTAM_VERIFY
     - uses: actions/upload-artifact@v7
       with:
         name: YouTube-IPA
