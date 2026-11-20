@@ -11,7 +11,7 @@ name: IPA (YTKACE built-in RYD for Shorts/details + v10.17 main counts 30s)
         description: 'Official YTKACE release: latest or tag (e.g. v1.1.7)'
         required: true
         type: string
-        default: latest
+        default: v1.1.8
       add_ryd:
         description: 'Extra RYD: regular-video button counts, 30s refresh (default ON)'
         type: boolean
@@ -108,7 +108,7 @@ jobs:
         if-no-files-found: error
   package:
     needs: ytkace
-    runs-on: macos-26
+    runs-on: macos-15
     env:
       THEOS: ${{ github.workspace }}/.theos
       CI: 'true'
@@ -131,7 +131,7 @@ jobs:
 
         version="$(cat built-ytkace/ytkace-version.txt)"
 
-        [[ "$tag" =~ ^v[0-9]+\.[0-9]+\ .[0-9]+$ ]]
+        [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
 
         test -n "$version"
 
@@ -177,6 +177,74 @@ jobs:
         bash -c "$(curl -fsSL https://raw.githubusercontent.com/roothide/theos/master/bin/install-theos)"
 
         '
+    - name: Prepare YTABConfig Mix post-hook defaults (editable)
+      if: ${{ inputs.add_ytabconfig }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        cat > "$RUNNER_TEMP/patch-ytabc-mix.py" <<'PY_YTABC_MIX'
+        from pathlib import Path
+        import re, sys
+        root = Path(sys.argv[1])
+        settings, tweak = root / 'Settings.x', root / 'Tweak.x'
+        s, t = settings.read_text(), tweak.read_text()
+        def once(source, old, new, label):
+            if source.count(old) != 1:
+                raise SystemExit('YTABConfig Mix post-hook: upstream mismatch: ' + label)
+            return source.replace(old, new, 1)
+        # Only run after all three upstream hookClass calls have returned.
+        # Use the native UI setter, which takes cacheMutex itself.
+        anchor = 'static void setValueFromImport(NSString *settingKey, BOOL value) {'
+        helper = r'''// Initial defaults only: users can still edit the two flags afterwards.
+        void YTABCApplyMixDefaultsAfterHooks(void) {
+            NSArray<NSString *> *targets = @[
+                @"queueClientGlobalConfigIosEnablePlaylistEntryPointFab",
+                @"queueClientGlobalConfigIosEnableQueuePhase4V2"
+            ];
+            NSMutableArray<NSArray<NSString *> *> *matches = [NSMutableArray array];
+            pthread_mutex_lock(&cacheMutex);
+            for (NSString *classKey in cache) {
+                for (NSString *method in cache[classKey]) {
+                    for (NSString *target in targets) {
+                        if ([method caseInsensitiveCompare:target] == NSOrderedSame) {
+                            [matches addObject:@[classKey, method]];
+                            break;
+                        }
+                    }
+                }
+            }
+            pthread_mutex_unlock(&cacheMutex);
+            // Never call setValue or getKey while holding cacheMutex.
+            NSMutableSet<NSString *> *found = [NSMutableSet set];
+            for (NSArray<NSString *> *pair in matches) {
+                NSString *classKey = pair[0], *method = pair[1];
+                NSString *marker = [NSString stringWithFormat:@"YTKACEMixPostHookV3.%@.%@", classKey, method];
+                if (![defaults boolForKey:marker]) {
+                    setValue(method, classKey, NO);
+                    [defaults setBool:YES forKey:marker];
+                }
+                [found addObject:method.lowercaseString];
+            }
+            updateAllKeys();
+            for (NSArray<NSString *> *pair in matches) {
+                NSLog(@"[YTABC-MixPostHook-v3] %@.%@ = %d", pair[0], pair[1], (int)getValue(getKey(pair[1], pair[0])));
+            }
+            NSLog(@"[YTABC-MixPostHook-v3] recognized %lu/2 target flags", (unsigned long)found.count);
+        }
+
+        '''
+        s = once(s, anchor, 'void updateAllKeys(void);\n' + helper + anchor, 'native setter location')
+        t = once(t, 'extern BOOL getValue(NSString *methodKey);',
+                 'extern BOOL getValue(NSString *methodKey);\nextern void YTABCApplyMixDefaultsAfterHooks(void);', 'declaration')
+        # Anchor to the real enabled launch path, not a guessed config class.
+        pattern = r'(hookClass\(globalConfig\);\s*hookClass\(coldConfig\);\s*hookClass\(hotConfig\);)'
+        if len(re.findall(pattern, t)) != 1:
+            raise SystemExit('YTABConfig Mix post-hook: launch hook sequence not found')
+        t = re.sub(pattern, r'\1\n        YTABCApplyMixDefaultsAfterHooks();', t, count=1)
+        settings.write_text(s)
+        tweak.write_text(t)
+        print('YTABConfig Mix post-hook: native setter, outside lock, editable OFF defaults')
+        PY_YTABC_MIX
     - name: Build selected tweak DEBs together (no individual artifacts)
       env:
         ADD_RYD: ${{ inputs.add_ryd }}
@@ -201,7 +269,7 @@ jobs:
         build_one() {\n  local key=\"$1\" repo=\"$2\" flag=\"$3\" out=\"sources/$1\"\n  [[ \"$flag\" == true ]]\
         \ || return 0\n  echo \"::group::Building optional tweak $key\"\n  if ! git clone --depth 1 --recurse-submodules\
         \ \"https://github.com/$repo.git\" \"$out\"; then\n    echo \"FAILED $key: git clone\" | tee -a selected-failed.txt\n\
-        \    echo '::endgroup::'\n    return 0\n  fi\n  # RYD upstream filters only the stock bundle ID. Sideload\
+        \    echo '::endgroup::'\n    return 0\n  fi\n  if [[ \"$key\" == ytabconfig ]]; then\n    if ! python3 \"$RUNNER_TEMP/patch-ytabc-mix.py\" \"$out\"; then\n      echo \"FAILED $key: Mix default OFF patch failed; refusing unpatched YTABConfig\" | tee -a selected-failed.txt\n      echo '::endgroup::'\n      return 0\n    fi\n  fi\n  # RYD upstream filters only the stock bundle ID. Sideload\
         \ signing\n  # may change CFBundleIdentifier, preventing Substrate from loading\n  # an otherwise correctly\
         \ injected dylib. Match the executable\n  # instead, which remains \"YouTube\" for this IPA build.\n  if\
         \ [[ \"$key\" == ryd ]]; then\n    python3 - \"$out\" <<'PY_RYD_FILTER'\nfrom pathlib import Path\nimport\
@@ -990,6 +1058,22 @@ jobs:
         \necho '**Note:** CI API testing cannot prove iPhone connectivity, runtime hook invocation, or dislike display.'\
         \ >> \"$GITHUB_STEP_SUMMARY\"\nif [[ \"$integration\" == fallback* ]]; then\n  echo '::warning::Requested\
         \ tweaks were not included. Final IPA is marked FALLBACK in its filename.'\nfi\n"
+    - name: Verify selected YTABConfig Mix patch in final IPA
+      if: ${{ inputs.add_ytabconfig }}
+      shell: bash
+      env:
+        IPA_PATH: ${{ steps.inject.outputs.ipa }}
+      run: |
+        set -euo pipefail
+        python3 - "$IPA_PATH" <<'PY_MIX_VERIFY'
+        import sys, zipfile
+        from pathlib import PurePosixPath
+        with zipfile.ZipFile(sys.argv[1]) as z:
+            paths = [p for p in z.namelist() if p.startswith('Payload/') and PurePosixPath(p).name.lower() == 'ytabconfig.dylib']
+            assert len(paths) == 1, f'Expected selected YTABConfig dylib: {paths}'
+            assert b'YTABC-MixPostHook-v3' in z.read(paths[0]), 'Compiled YTABConfig Mix post-hook patch missing'
+            print('PASS: patched YTABConfig included in final IPA')
+        PY_MIX_VERIFY
     - uses: actions/upload-artifact@v7
       with:
         name: YouTube-IPA
