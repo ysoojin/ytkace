@@ -8,10 +8,10 @@ name: IPA (YTKACE built-in RYD for Shorts/details + v10.17 main counts 30s)
         type: string
         default: ''
       ytkace_ref:
-        description: 'Official YTKACE release: latest or tag (e.g. v1.1.7)'
+        description: 'Official YTKACE release: latest (auto) or tag (e.g. v1.1.9)'
         required: true
         type: string
-        default: v1.1.8
+        default: latest
       add_ryd:
         description: 'Extra RYD: regular-video button counts, 30s refresh (default ON)'
         type: boolean
